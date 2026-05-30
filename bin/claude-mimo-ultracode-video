@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export CLAUDE_MIMO_ULTRACODE_PORT="${CLAUDE_MIMO_ULTRACODE_PORT:-18766}"
+export DEVIN_MIMO_REQUEST_MAX_TOKENS="${DEVIN_MIMO_REQUEST_MAX_TOKENS:-8192}"
+export DEVIN_MIMO_ENABLE_THINKING="${DEVIN_MIMO_ENABLE_THINKING:-0}"
+export DEVIN_MIMO_TIMING_LOG="${DEVIN_MIMO_TIMING_LOG:-1}"
+
+printf '\033]0;MiMo v2.5 Pro UltraCode\007'
+
+if [[ "${1:-}" == "--smoke" ]]; then
+  shift
+  exec claude-mimo-ultracode --smoke "${*:-Say only VIDEO_MIMO_OK}"
+fi
+
+exec claude-mimo-ultracode \
+  --name "MiMo v2.5 Pro UltraCode" \
+  --append-system-prompt "For this session, when asked what backend model is running, answer: MiMo v2.5 Pro via local UltraCode shim." \
+  "$@"

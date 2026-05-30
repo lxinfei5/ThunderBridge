@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# UltraCode launcher — routes claude-opus-4-8 to Cursor Composer via local shim.
+set -euo pipefail
+
+PORT="${CLAUDE_COMPOSER_ULTRACODE_PORT:-18767}"
+HOST="${CLAUDE_COMPOSER_ULTRACODE_HOST:-127.0.0.1}"
+BASE_URL="http://${HOST}:${PORT}"
+PROXY_DIR="${CLAUDE_COMPOSER_ULTRACODE_PROXY_DIR:-$HOME/devin-local-proxy}"
+SHIM="$PROXY_DIR/byok_oai_shim.py"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-composer-ultracode"
+SETTINGS_FILE="$STATE_DIR/settings.json"
+PID_FILE="$STATE_DIR/shim.pid"
+LOG_FILE="$STATE_DIR/shim.log"
+CLAUDE_BIN="${CLAUDE_BIN:-}"
+COMPOSER_BACKEND="${CLAUDE_COMPOSER_ULTRACODE_BACKEND:-composer-2.5-fast}"
+REQUEST_WORKSPACE="${CURSOR_AGENT_WORKSPACE:-${PWD:-$HOME/repos}}"
+
+mkdir -p "$STATE_DIR"
+
+if [[ ! -f "$SHIM" ]]; then
+  echo "[claude-composer-ultracode] missing shim: $SHIM" >&2
+  echo "[claude-composer-ultracode] set CLAUDE_COMPOSER_ULTRACODE_PROXY_DIR or install byok_oai_shim.py" >&2
+  exit 1
+fi
+
+health_ok() {
+  python3 - "$BASE_URL" <<'PY' >/dev/null 2>&1
+import json, sys, urllib.request
+url = sys.argv[1].rstrip('/') + '/healthz'
+with urllib.request.urlopen(url, timeout=2) as r:
+    data = json.loads(r.read().decode())
+if not data.get('ok'):
+    raise SystemExit(1)
+models = set(data.get('models') or [])
+if 'composer-2.5-fast' not in models or 'claude-opus-4-8' not in models:
+    raise SystemExit(1)
+PY
+}
+
+start_shim() {
+  if [[ -f "$PID_FILE" ]]; then
+    old_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null && health_ok; then
+      return 0
+    fi
+  fi
+
+  if health_ok; then
+    return 0
+  fi
+
+  echo "[claude-composer-ultracode] starting Composer UltraCode shim on $BASE_URL" >&2
+  (
+    cd "$PROXY_DIR"
+    exec env \
+      DEVIN_BYOK_SHIM_HOST="$HOST" \
+      DEVIN_BYOK_SHIM_PORT="$PORT" \
+      CLAUDE_CODE_ULTRACODE_BACKEND="$COMPOSER_BACKEND" \
+      CURSOR_AGENT_WORKSPACE="$REQUEST_WORKSPACE" \
+      DEVIN_BYOK_SHIM_LOG_FLUSH=1 \
+      python3 "$SHIM" --host "$HOST" --port "$PORT"
+  ) >>"$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+
+  for _ in {1..40}; do
+    if health_ok; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  echo "[claude-composer-ultracode] shim did not become healthy; log: $LOG_FILE" >&2
+  tail -40 "$LOG_FILE" >&2 || true
+  exit 1
+}
+
+write_settings() {
+  cat > "$SETTINGS_FILE" <<'JSON'
+{
+  "ultracode": true
+}
+JSON
+}
+
+find_claude() {
+  if [[ -n "$CLAUDE_BIN" ]]; then
+    printf '%s\n' "$CLAUDE_BIN"
+    return 0
+  fi
+  if command -v claude >/dev/null 2>&1; then
+    command -v claude
+    return 0
+  fi
+  local win_npm="${APPDATA:-/mnt/c/Users/$USER/AppData/Roaming}/npm/claude"
+  if [[ -x "$win_npm" ]]; then
+    printf '%s\n' "$win_npm"
+    return 0
+  fi
+  echo "[claude-composer-ultracode] could not find claude; set CLAUDE_BIN=/path/to/claude" >&2
+  exit 1
+}
+
+start_shim
+write_settings
+CLAUDE_REAL="$(find_claude)"
+
+unset CLAUDE_CODE_EFFORT_LEVEL
+export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-sk-ant-dummy}"
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export CLAUDE_CODE_WORKFLOWS="${CLAUDE_CODE_WORKFLOWS:-1}"
+export WSLENV="ANTHROPIC_API_KEY:ANTHROPIC_BASE_URL:CLAUDE_CODE_WORKFLOWS${WSLENV:+:$WSLENV}"
+
+if [[ "${1:-}" == "--smoke" ]]; then
+  shift
+  exec "$CLAUDE_REAL" --print --model claude-opus-4-8 --settings "$SETTINGS_FILE" "${*:-Reply with exactly: COMPOSER_ULTRACODE_OK}"
+fi
+
+exec "$CLAUDE_REAL" --model claude-opus-4-8 --settings "$SETTINGS_FILE" "$@"
