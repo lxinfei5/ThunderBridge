@@ -4,7 +4,7 @@ codex_oauth.py -- optional helper that lets UltraCode-Shim route a model to
 GPT-5.5 (and other Codex models) using a ChatGPT/Codex *login* instead of an
 API key.
 
-This is only used by slots whose "type" is "codex_oauth". It is pure Python
+This is only used by routes whose "type" is "codex_oauth". It is pure Python
 standard library (no pip install). It reuses the credentials created by the
 official Codex CLI, so the user must first run:
 
@@ -15,7 +15,7 @@ WHAT IT IS NOT
 This is a thin protocol adapter. It does not implement an OAuth device flow
 itself (the Codex CLI does that and writes ~/.codex/auth.json); it just reads
 that token, talks to the Codex Responses API, and converts the result into the
-small event vocabulary ultracode_proxy.py consumes:
+small event vocabulary proxy.py consumes:
 
     {"type": "text_delta",  "text": "..."}
     {"type": "tool_call",   "id": "...", "name": "...", "arguments": "<json>"}

@@ -5,10 +5,10 @@
   full UltraCode behavior.
 
 .DESCRIPTION
-  Starts gateway/ultracode_proxy.py on a loopback port, points Claude Code at it
-  via ANTHROPIC_BASE_URL, enables gateway model discovery, seeds the discovery
-  cache so your models show on first open, then runs `claude`. When Claude Code
-  exits, the proxy is stopped.
+  Starts proxy.py on a loopback port, points Claude Code at it via
+  ANTHROPIC_BASE_URL, enables gateway model discovery, seeds the discovery cache
+  so your models show on first open, then runs `claude`. When Claude Code exits,
+  the proxy is stopped.
 
   Your normal Claude Code install is untouched: this only sets environment for
   THIS process and uses a session-scoped --settings file.
@@ -17,33 +17,29 @@
   Start the proxy and print how to connect, but don't launch Claude Code.
 
 .PARAMETER Port
-  Loopback port for the proxy. Default 8141.
+  Loopback port for the proxy. 0 (default) reads proxy.listen_port from
+  config.json, falling back to 8141.
 
 .EXAMPLE
   .\windows\Start-UltraCode.ps1
 #>
 param(
     [switch]$ProxyOnly,
-    [int]$Port = 8141,
-    [string]$Upstream = "https://api.anthropic.com"
+    [int]$Port = 0,
+    [string]$Upstream = ""
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot   = Split-Path -Parent $PSScriptRoot
-$Gateway    = Join-Path $RepoRoot "gateway"
-$Proxy      = Join-Path $Gateway "ultracode_proxy.py"
-$ConfigDir  = Join-Path $RepoRoot "config"
-$SlotsFile  = Join-Path $ConfigDir "ultracode_slots.json"
-$ModelsFile = Join-Path $ConfigDir "ultracode_models.json"
-$EnvFile    = Join-Path $ConfigDir "ultracode.env"
+$RepoRoot      = Split-Path -Parent $PSScriptRoot
+$Proxy         = Join-Path $RepoRoot "proxy.py"
+$Config        = Join-Path $RepoRoot "config.json"
+$ConfigExample = Join-Path $RepoRoot "config.example.json"
+$EnvFile       = Join-Path $RepoRoot "ultracode.env"
 
 # ----- locate Python --------------------------------------------------------
 function Find-Python {
     foreach ($cand in @(@("py","-3"), @("python"), @("python3"))) {
-        $exe = $cand[0]
-        if (Get-Command $exe -ErrorAction SilentlyContinue) {
-            return ,$cand
-        }
+        if (Get-Command $cand[0] -ErrorAction SilentlyContinue) { return ,$cand }
     }
     throw "Python 3 not found. Install it from https://www.python.org/downloads/ (check 'Add to PATH')."
 }
@@ -55,15 +51,23 @@ if (-not $Claude) {
     throw "Claude Code CLI not found. Install it with: npm i -g @anthropic-ai/claude-code"
 }
 
-# ----- ensure config exists (copy from examples on first run) ---------------
-if (-not (Test-Path $SlotsFile))  { Copy-Item (Join-Path $ConfigDir "ultracode_slots.example.json")  $SlotsFile }
-if (-not (Test-Path $ModelsFile)) { Copy-Item (Join-Path $ConfigDir "ultracode_models.example.json") $ModelsFile }
-if (-not (Test-Path $EnvFile) -and (Test-Path (Join-Path $ConfigDir "ultracode.example.env"))) {
-    Copy-Item (Join-Path $ConfigDir "ultracode.example.env") $EnvFile
-    Write-Host "Created config\ultracode.env - add your API keys there for any 'openai_compat' backends." -ForegroundColor Yellow
+# ----- ensure config.json exists (copy from the example on first run) -------
+if (-not (Test-Path $Config)) {
+    Copy-Item $ConfigExample $Config
+    Write-Host "Created config.json from config.example.json - edit it to keep the models you have (and add your keys)." -ForegroundColor Yellow
+}
+$Cfg = Get-Content $Config -Raw | ConvertFrom-Json
+
+# ----- resolve port + upstream from config.json (params/env override) -------
+if ($Port -le 0) {
+    $Port = 8141
+    if ($Cfg.proxy.listen_port) { $Port = [int]$Cfg.proxy.listen_port }
+}
+if (-not $Upstream) {
+    $Upstream = if ($Cfg.proxy.anthropic_upstream) { [string]$Cfg.proxy.anthropic_upstream } else { "https://api.anthropic.com" }
 }
 
-# ----- load ultracode.env into this process (for ${VAR} expansion) ----------
+# ----- load optional ultracode.env into this process (for ${VAR} auth) ------
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | ForEach-Object {
         $line = $_.Trim()
@@ -83,22 +87,21 @@ $BaseUrl  = "http://127.0.0.1:$Port"
     ultracode = $true
     model     = "claude-opus-4-8"
     env       = @{
-        ANTHROPIC_BASE_URL                      = $BaseUrl
-        CLAUDE_CODE_WORKFLOWS                   = "1"
-        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
+        ANTHROPIC_BASE_URL                         = $BaseUrl
+        CLAUDE_CODE_WORKFLOWS                       = "1"
+        CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY  = "1"
     }
 } | ConvertTo-Json -Depth 5 | Set-Content -Path $Settings -Encoding utf8
 
 # ----- proxy environment ----------------------------------------------------
+$env:UC_CONFIG      = $Config
 $env:UC_LISTEN_PORT = "$Port"
 $env:UC_UPSTREAM    = $Upstream
-$env:UC_SLOT_MAP    = $SlotsFile
-$env:UC_MODELS_FILE = $ModelsFile
 $env:UC_LOG         = Join-Path $StateDir "ultracode_proxy.log"
 
 # ----- kill any stale proxy on this port ------------------------------------
 Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='python3.exe'" |
-    Where-Object { $_.CommandLine -match 'ultracode_proxy\.py' } |
+    Where-Object { $_.CommandLine -match '\bproxy\.py' } |
     ForEach-Object {
         Write-Host "Stopping existing UltraCode proxy PID $($_.ProcessId)"
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -133,14 +136,13 @@ $CfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Pat
 $GwCache = Join-Path (Join-Path $CfgDir "cache") "gateway-models.json"
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path $GwCache) | Out-Null
-    $mj = Get-Content $ModelsFile -Raw | ConvertFrom-Json
     $seed = [ordered]@{
         baseUrl   = $BaseUrl
         fetchedAt = [int64]([datetimeoffset](Get-Date)).ToUnixTimeMilliseconds()
-        models    = @($mj.models | ForEach-Object { [ordered]@{ id = $_.id; display_name = $_.display_name } })
+        models    = @($Cfg.models | ForEach-Object { [ordered]@{ id = $_.id; display_name = $_.display_name } })
     }
     $seed | ConvertTo-Json -Depth 5 | Set-Content -Path $GwCache -Encoding utf8
-    Write-Host "Seeded gateway-models cache ($($mj.models.Count) models)."
+    Write-Host "Seeded gateway-models cache ($(@($Cfg.models).Count) models)."
 } catch {
     Write-Host "WARN: could not seed gateway-models cache: $_" -ForegroundColor Yellow
 }

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Self-contained end-to-end test for ultracode_proxy.py.
+"""Self-contained end-to-end test for proxy.py.
 
 Runs entirely offline against a mock backend (no real API keys, no network).
 Proves: /v1/models discovery merge, the UltraCode envelope on passthrough,
-OpenAI<->Anthropic tool-call translation, and ${ENV} expansion in slots.
+OpenAI<->Anthropic tool-call translation, and ${ENV} expansion in routes.
 
-    python3 gateway/test_proxy.py        # exits 0 on success
+    python3 test_proxy.py        # exits 0 on success
 
 Used by scripts/doctor.py and by CI.
 """
@@ -94,22 +94,22 @@ def main():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     mock = "http://127.0.0.1:%d" % MOCK_PORT
 
-    slots = {
-        "claude-opus-4-8": {"model": "claude-opus-4-8", "upstream": mock, "auth": "passthrough"},
-        "claude-mock": {"type": "openai_compat", "model": "mock-model",
-                        "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}",
-                        "max_output_tokens": 1234,
-                        "headers": {"X-Test-UA": "openclaw/test"}},
+    config = {
+        "proxy": {"listen_port": PROXY_PORT, "anthropic_upstream": mock, "max_tokens_floor": 64000},
+        "models": [{"id": "claude-mock", "display_name": "Mock Model"}],
+        "routes": {
+            "claude-opus-4-8": {"model": "claude-opus-4-8", "upstream": mock, "auth": "passthrough"},
+            "claude-mock": {"type": "openai_compat", "model": "mock-model",
+                            "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}",
+                            "max_output_tokens": 1234,
+                            "headers": {"X-Test-UA": "openclaw/test"}},
+        },
     }
-    models = {"models": [{"id": "claude-mock", "display_name": "Mock Model"}]}
-    slots_f = os.path.join(GW, "_test_slots.json")
-    models_f = os.path.join(GW, "_test_models.json")
-    open(slots_f, "w").write(json.dumps(slots))
-    open(models_f, "w").write(json.dumps(models))
+    cfg_f = os.path.join(GW, "_test_config.json")
+    open(cfg_f, "w").write(json.dumps(config))
 
-    env = dict(os.environ, UC_LISTEN_PORT=str(PROXY_PORT), UC_UPSTREAM=mock,
-               UC_SLOT_MAP=slots_f, UC_MODELS_FILE=models_f, MOCK_KEY="secret123")
-    p = subprocess.Popen([sys.executable, os.path.join(GW, "ultracode_proxy.py")],
+    env = dict(os.environ, UC_CONFIG=cfg_f, MOCK_KEY="secret123")
+    p = subprocess.Popen([sys.executable, os.path.join(GW, "proxy.py")],
                          env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
         for _ in range(50):
@@ -156,20 +156,19 @@ def main():
         print("[ok] openai_compat streaming tool-call -> Anthropic tool_use")
 
         sys.path.insert(0, GW)
-        import ultracode_proxy as up
+        import proxy as up
         os.environ["MOCK_KEY"] = "secret123"
         assert up._expand_env("Bearer ${MOCK_KEY}") == "Bearer secret123"
-        print("[ok] ${ENV} expansion in slot auth")
+        print("[ok] ${ENV} expansion in route auth")
         print("\nALL TESTS PASSED")
         return 0
     finally:
         p.send_signal(signal.SIGTERM)
         srv.shutdown()
-        for f in (slots_f, models_f):
-            try:
-                os.remove(f)
-            except OSError:
-                pass
+        try:
+            os.remove(cfg_f)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

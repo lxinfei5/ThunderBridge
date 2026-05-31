@@ -15,9 +15,9 @@ plan for, delete the rest. (Cursor's Composer needs the `cursor-agent` CLI and
 isn't HTTP-based — see [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
 
 ```
-  Claude Code  ──ANTHROPIC_BASE_URL──▶  ultracode_proxy (loopback)  ──▶  the model you picked
-   /model menu  ◀── GET /v1/models ──   (adds UltraCode envelope,        (MiMo / OpenRouter /
-                                         routes by your slot map)          Codex OAuth / local / Claude)
+  Claude Code  ──ANTHROPIC_BASE_URL──▶  proxy.py (loopback)  ──▶  the model you picked
+   /model menu  ◀── GET /v1/models ──   (adds UltraCode envelope,   (MiMo / OpenRouter /
+                                         routes by your config.json)  Codex OAuth / local / Claude)
 ```
 
 > **How is this possible?** At the API level, "UltraCode" is just
@@ -45,8 +45,9 @@ cd UltraCode-Shim
 python scripts\doctor.py
 
 # 2. Tell it which models you want (see "Configure your models" below)
-#    Edit config\ultracode_slots.json and config\ultracode_models.json,
-#    put any API keys in config\ultracode.env
+#    Copy config.example.json to config.json, keep the models you have,
+#    and put your keys in it (config.json is gitignored).
+copy config.example.json config.json
 
 # 3. Create Desktop icons (one for UltraCode, one for normal Claude Code)
 .\windows\Install-DesktopIcons.ps1
@@ -55,56 +56,55 @@ python scripts\doctor.py
 ```
 
 macOS / Linux / WSL: run `python3 scripts/doctor.py` then `./bin/ultracode`.
+(The launchers copy `config.example.json` → `config.json` for you on first run if
+you skip step 2.)
 
 ## Configure your models
 
-Two small files in `config/` (copied from the `.example` versions on first run):
+Everything is in one file: **`config.json`** (copied from `config.example.json`).
+It has two sections you edit:
 
-- **`ultracode_models.json`** — what shows up in the `/model` menu.
-  Every id **must start with `claude` or `anthropic`** (Claude Code filters the rest out).
-- **`ultracode_slots.json`** — where each of those ids actually goes.
+- **`models`** — what shows up in the `/model` menu. Every `id` **must start with
+  `claude` or `anthropic`** (Claude Code filters the rest out).
+- **`routes`** — where each of those ids actually goes. The route key must match
+  the model `id`.
 
-Example: add MiMo and an OpenRouter model.
+Example — MiMo and an OpenRouter model:
 
-`config/ultracode_models.json`
-```json
-{ "models": [
-  { "id": "claude-mimo",            "display_name": "MiMo v2.5 Pro" },
-  { "id": "claude-openrouter-llama","display_name": "Llama 3.3 70B (OpenRouter)" }
-]}
-```
-
-`config/ultracode_slots.json`
-```json
+```jsonc
 {
-  "claude-mimo": {
-    "type": "openai_compat",
-    "model": "mimo-v2.5-pro",
-    "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
-    "auth": "Bearer ${MIMO_API_KEY}"
-  },
-  "claude-openrouter-llama": {
-    "type": "openai_compat",
-    "model": "meta-llama/llama-3.3-70b-instruct",
-    "upstream": "https://openrouter.ai/api/v1",
-    "auth": "Bearer ${OPENROUTER_API_KEY}"
+  "models": [
+    { "id": "claude-mimo",       "display_name": "MiMo v2.5 Pro" },
+    { "id": "claude-openrouter", "display_name": "Llama 3.3 70B (OpenRouter)" }
+  ],
+  "routes": {
+    "claude-mimo": {
+      "type": "openai_compat",
+      "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "model": "mimo-v2.5-pro",
+      "auth": "Bearer ${MIMO_API_KEY}"
+    },
+    "claude-openrouter": {
+      "type": "openai_compat",
+      "upstream": "https://openrouter.ai/api/v1",
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "auth": "Bearer ${OPENROUTER_API_KEY}"
+    }
   }
 }
 ```
 
-`config/ultracode.env` (gitignored — keys never get committed)
-```
-MIMO_API_KEY=...
-OPENROUTER_API_KEY=...
-```
+Put your key right in `config.json` (it's gitignored) or use `${ENV_VAR}` and
+export it — or drop keys into a gitignored `ultracode.env` the launchers load.
 
-Backend types:
+Route types:
 
 | `type`          | Use for                                            | Needs |
 |-----------------|----------------------------------------------------|-------|
-| *(omit)*        | Real Claude or any Anthropic-compatible endpoint   | `auth: "passthrough"` |
-| `openai_compat` | MiMo, OpenRouter, OpenAI, Together, local llama.cpp/Ollama — anything that speaks OpenAI Chat Completions (tools included) | an API key in `ultracode.env` |
+| *(omit)*        | Real Claude or any Anthropic-compatible endpoint   | nothing, or `auth`/`upstream` |
+| `openai_compat` | MiMo, DeepSeek, OpenRouter, OpenAI, Ollama, local llama.cpp — anything that speaks OpenAI Chat Completions (tools included) | an API key |
 | `codex_oauth`   | GPT‑5.5 via a ChatGPT/Codex login (no API key)     | `codex login` once |
+| `cursor_agent`  | Cursor Composer (experimental)                     | `cursor-agent login` |
 
 Full walkthrough: [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).
 

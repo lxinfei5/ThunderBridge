@@ -2,16 +2,14 @@
 *.pyc
 __pycache__/
 
-# User config (copied from *.example.* on first run) — never commit choices/keys
-/config/ultracode.env
-/config/ultracode_slots.json
-/config/ultracode_models.json
+# Your editable config (copied from config.example.json) — holds your keys
+/config.json
 
 # Secrets / logs / local state
 *.env
-!config/ultracode.example.env
 *.log
-gateway/_test_*.json
+_test_*.json
+.uc_probe/
 
 # OS
 .DS_Store

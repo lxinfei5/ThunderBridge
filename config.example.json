@@ -1,0 +1,94 @@
+{
+  "_README": "Copy this file to config.json and edit THAT (config.json is gitignored so your keys never get committed). Keep only the models you have a plan/key for and delete the rest. Comments are any key starting with '_' and are ignored. Full guide: README.md + docs/ADD_A_MODEL.md.",
+
+  "_proxy": "Defaults are fine for almost everyone.",
+  "proxy": {
+    "_listen_port": "Local port the proxy listens on (the launchers point Claude Code here). Change only if 8141 is taken.",
+    "listen_port": 8141,
+    "_anthropic_upstream": "Where the real Anthropic API lives. Don't change unless you know why.",
+    "anthropic_upstream": "https://api.anthropic.com",
+    "_max_tokens_floor": "Ultracode raises every request to at least this many max_tokens. 64000 matches real ultracode.",
+    "max_tokens_floor": 64000
+  },
+
+  "_models": "What shows in Claude Code's /model picker. id MUST start with 'claude' or 'anthropic' (others are silently dropped). display_name is the label you see.",
+  "models": [
+    { "id": "claude-gpt-5.5-codex",     "display_name": "GPT-5.5 (Codex OAuth)" },
+    { "id": "claude-mimo",              "display_name": "MiMo v2.5 Pro" },
+    { "id": "claude-deepseek-v4-pro",   "display_name": "DeepSeek V4 Pro" },
+    { "id": "claude-deepseek-v4-flash", "display_name": "DeepSeek V4 Flash" },
+    { "id": "claude-step-flash",        "display_name": "Step Flash" },
+    { "id": "claude-ollama-cloud",      "display_name": "Ollama Cloud" },
+    { "id": "claude-opencode",          "display_name": "Claude via OpenCode Go" },
+    { "id": "claude-openrouter",        "display_name": "Llama 3.3 70B (OpenRouter)" },
+    { "id": "claude-local",             "display_name": "Local model" },
+    { "id": "claude-composer",          "display_name": "Composer 2.5 (Cursor, experimental)" }
+  ],
+
+  "_routes": "Where each model id above goes. The key MUST match an id in 'models'. Put your API key right here (config.json is gitignored) or use ${ENV_VAR} and set it in your environment. type: omit/'anthropic' = passthrough to Anthropic; 'openai_compat' = any OpenAI Chat Completions backend (with tool-calling); 'codex_oauth' = GPT-5.5 via `codex login`; 'cursor_agent' = Cursor Composer via the cursor-agent CLI (experimental). For openai_compat, 'upstream' is the base URL exactly as the provider documents it (usually ends in /v1) - the proxy appends /chat/completions. Optional: 'headers' {}, 'max_output_tokens' (default 8192).",
+  "routes": {
+    "claude-gpt-5.5-codex": {
+      "_": "Needs `codex login` once; no API key. effort/tier via UC_CODEX_EFFORT/UC_CODEX_SERVICE_TIER.",
+      "type": "codex_oauth",
+      "model": "gpt-5.5"
+    },
+    "claude-mimo": {
+      "type": "openai_compat",
+      "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "model": "mimo-v2.5-pro",
+      "auth": "Bearer REPLACE_WITH_YOUR_MIMO_KEY"
+    },
+    "claude-deepseek-v4-pro": {
+      "type": "openai_compat",
+      "upstream": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-pro",
+      "auth": "Bearer REPLACE_WITH_YOUR_DEEPSEEK_KEY"
+    },
+    "claude-deepseek-v4-flash": {
+      "type": "openai_compat",
+      "upstream": "https://api.deepseek.com/v1",
+      "model": "deepseek-v4-flash",
+      "auth": "Bearer REPLACE_WITH_YOUR_DEEPSEEK_KEY"
+    },
+    "claude-step-flash": {
+      "_": "StepFun. Set model to the id your plan exposes (e.g. step-3.5-flash).",
+      "type": "openai_compat",
+      "upstream": "https://api.stepfun.ai/v1",
+      "model": "step-3.5-flash",
+      "auth": "Bearer REPLACE_WITH_YOUR_STEPFUN_KEY"
+    },
+    "claude-ollama-cloud": {
+      "_": "Ollama Cloud plan. Swap model for any cloud model (deepseek-v4-pro, qwen3-coder, gpt-oss:120b, ...).",
+      "type": "openai_compat",
+      "upstream": "https://ollama.com/v1",
+      "model": "gpt-oss:120b",
+      "auth": "Bearer REPLACE_WITH_YOUR_OLLAMA_KEY"
+    },
+    "claude-opencode": {
+      "_": "OpenCode Go plan (Anthropic-native passthrough). Set model to the id your plan exposes.",
+      "upstream": "https://opencode.ai/zen/go",
+      "model": "claude-sonnet-4-5",
+      "auth": "Bearer REPLACE_WITH_YOUR_OPENCODE_KEY",
+      "headers": { "User-Agent": "openclaw/2026.4.20" }
+    },
+    "claude-openrouter": {
+      "_": "Any OpenRouter model - swap model for any slug OpenRouter lists.",
+      "type": "openai_compat",
+      "upstream": "https://openrouter.ai/api/v1",
+      "model": "meta-llama/llama-3.3-70b-instruct",
+      "auth": "Bearer REPLACE_WITH_YOUR_OPENROUTER_KEY"
+    },
+    "claude-local": {
+      "_": "A local OpenAI-compatible server (Ollama :11434, llama.cpp :8080, LM Studio :1234). The key is usually ignored.",
+      "type": "openai_compat",
+      "upstream": "http://127.0.0.1:11434/v1",
+      "model": "your-local-model",
+      "auth": "Bearer local"
+    },
+    "claude-composer": {
+      "_": "EXPERIMENTAL. Cursor Composer via the cursor-agent CLI (run `cursor-agent login`). Best for reasoning/answers; tool-calling is a best-effort bridge. See docs/ADD_A_MODEL.md.",
+      "type": "cursor_agent",
+      "model": "composer-2.5"
+    }
+  }
+}

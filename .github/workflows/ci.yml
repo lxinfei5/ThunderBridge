@@ -16,8 +16,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Compile (no third-party deps)
-        run: python -m compileall gateway scripts
+        run: python -m compileall proxy.py test_proxy.py providers scripts
       - name: Offline self-test
-        run: python gateway/test_proxy.py
+        run: python test_proxy.py
       - name: Doctor (config validation, skip nested test)
         run: python scripts/doctor.py --no-test --ci

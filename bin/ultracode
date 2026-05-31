@@ -2,42 +2,44 @@
 # UltraCode-Shim launcher for macOS / Linux / WSL.
 # Windows users: use windows\Start-UltraCode.ps1 instead.
 #
-# Starts gateway/ultracode_proxy.py, points Claude Code at it with gateway model
-# discovery enabled, seeds the discovery cache, runs `claude`, then stops the
-# proxy on exit. Your normal Claude Code install is untouched (session-scoped
-# --settings + env only).
+# Starts proxy.py, points Claude Code at it with gateway model discovery
+# enabled, seeds the discovery cache, runs `claude`, then stops the proxy on
+# exit. Your normal Claude Code install is untouched (session-scoped --settings
+# + env only).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GATEWAY="$REPO/gateway"
-CONFIG="$REPO/config"
-PORT="${UC_LISTEN_PORT:-8141}"
-UPSTREAM="${UC_UPSTREAM:-https://api.anthropic.com}"
-BASE_URL="http://127.0.0.1:${PORT}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ultracode-shim"
-SETTINGS="$STATE_DIR/ultracode_settings.json"
-PID_FILE="$STATE_DIR/proxy.pid"
-LOG_FILE="$STATE_DIR/proxy.log"
+PROXY="$REPO/proxy.py"
+CONFIG="$REPO/config.json"
+CONFIG_EXAMPLE="$REPO/config.example.json"
+ENV_FILE="$REPO/ultracode.env"
+BASE_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/ultracode-shim"
+SETTINGS="$BASE_STATE/ultracode_settings.json"
+PID_FILE="$BASE_STATE/proxy.pid"
+LOG_FILE="$BASE_STATE/proxy.log"
 
 PY="$(command -v python3 || command -v python || true)"
 [[ -n "$PY" ]] || { echo "Python 3 not found." >&2; exit 1; }
 command -v claude >/dev/null 2>&1 || { echo "claude CLI not found - npm i -g @anthropic-ai/claude-code" >&2; exit 1; }
 
-mkdir -p "$STATE_DIR"
+mkdir -p "$BASE_STATE"
 
-# Config: copy from examples on first run.
-[[ -f "$CONFIG/ultracode_slots.json"  ]] || cp "$CONFIG/ultracode_slots.example.json"  "$CONFIG/ultracode_slots.json"
-[[ -f "$CONFIG/ultracode_models.json" ]] || cp "$CONFIG/ultracode_models.example.json" "$CONFIG/ultracode_models.json"
-if [[ ! -f "$CONFIG/ultracode.env" && -f "$CONFIG/ultracode.example.env" ]]; then
-  cp "$CONFIG/ultracode.example.env" "$CONFIG/ultracode.env"
-  echo "Created config/ultracode.env - add API keys there for openai_compat backends."
+# Config: copy from the example on first run.
+if [[ ! -f "$CONFIG" ]]; then
+  cp "$CONFIG_EXAMPLE" "$CONFIG"
+  echo "Created config.json from config.example.json - edit it to keep the models you have (and add your keys)."
 fi
 
-# Load ultracode.env (for ${VAR} expansion in slots).
-if [[ -f "$CONFIG/ultracode.env" ]]; then
-  set -a; # shellcheck disable=SC1091
-  . "$CONFIG/ultracode.env"; set +a
+# Load optional ultracode.env (gitignored) for ${VAR} expansion in routes.
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; # shellcheck disable=SC1090
+  . "$ENV_FILE"; set +a
 fi
+
+# Resolve port + upstream from config.json (env overrides win).
+PORT="${UC_LISTEN_PORT:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1]));print(int((c.get("proxy") or {}).get("listen_port") or 8141))' "$CONFIG" 2>/dev/null || echo 8141)}"
+UPSTREAM="${UC_UPSTREAM:-$("$PY" -c 'import json,sys;c=json.load(open(sys.argv[1]));print((c.get("proxy") or {}).get("anthropic_upstream") or "https://api.anthropic.com")' "$CONFIG" 2>/dev/null || echo https://api.anthropic.com)}"
+BASE_URL="http://127.0.0.1:${PORT}"
 
 # Session settings (ultracode + discovery env).
 cat > "$SETTINGS" <<JSON
@@ -63,11 +65,8 @@ PY
 start_proxy() {
   if health_ok; then return 0; fi
   echo "Starting UltraCode proxy on $BASE_URL -> $UPSTREAM ..."
-  UC_LISTEN_PORT="$PORT" UC_UPSTREAM="$UPSTREAM" \
-    UC_SLOT_MAP="$CONFIG/ultracode_slots.json" \
-    UC_MODELS_FILE="$CONFIG/ultracode_models.json" \
-    UC_LOG="$LOG_FILE" \
-    "$PY" "$GATEWAY/ultracode_proxy.py" >>"$LOG_FILE" 2>&1 &
+  UC_CONFIG="$CONFIG" UC_LISTEN_PORT="$PORT" UC_UPSTREAM="$UPSTREAM" UC_LOG="$LOG_FILE" \
+    "$PY" "$PROXY" >>"$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   for _ in $(seq 1 40); do health_ok && return 0; sleep 0.25; done
   echo "Proxy did not become healthy. Log: $LOG_FILE" >&2
@@ -85,13 +84,14 @@ start_proxy
 
 # Seed Claude Code's gateway-models cache so models show on first /model open.
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-"$PY" - "$CONFIG/ultracode_models.json" "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
+"$PY" - "$CONFIG" "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
 import json,os,sys,time
-models_f, cache_f, base = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_f, cache_f, base = sys.argv[1], sys.argv[2], sys.argv[3]
 os.makedirs(os.path.dirname(cache_f), exist_ok=True)
-models=(json.load(open(models_f)) or {}).get("models",[])
+models=(json.load(open(cfg_f)) or {}).get("models",[]) or []
 json.dump({"baseUrl":base,"fetchedAt":int(time.time()*1000),
-           "models":[{"id":m["id"],"display_name":m.get("display_name",m["id"])} for m in models]},
+           "models":[{"id":m["id"],"display_name":m.get("display_name",m["id"])}
+                     for m in models if isinstance(m,dict) and m.get("id")]},
           open(cache_f,"w"))
 PY
 

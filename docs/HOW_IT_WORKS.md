@@ -1,90 +1,91 @@
 # How it works
 
-## The one surprising fact
+UltraCode-Shim is a tiny loopback proxy plus a launcher. There is no magic and
+no secret model. This page explains the mechanism and the reverse-engineering it
+is based on.
 
-Claude Code's **UltraCode** mode is not a separate model and does not send a
-secret API field. Reverse-engineering the client shows that, at the
-`api.anthropic.com` boundary, `--effort xhigh` and `{"ultracode": true}` produce
-a **structurally identical** request. The only material thing UltraCode adds is an
-injected system reminder. Modeled simply:
+## 1. What "UltraCode" actually is
 
-```
-ultracode  =  output_config.effort = "xhigh"
-            + thinking = {"type": "adaptive"}
-            + max_tokens >= 64000
-            + a "Ultracode is on: ..." system reminder
-            + (client-side) the Workflow tool + standing opt-in
-```
+At the Anthropic API boundary, Claude Code's **UltraCode** mode is not a hidden
+model — it's an *envelope* applied to an ordinary `/v1/messages` request:
 
-The Workflow tool, multi-agent runtime, and attachment lifecycle all live
-**inside** the Claude Code client and fire regardless of which backend answers the
-request. So if we make sure every request carries that envelope, *any* model gets
-the UltraCode treatment.
+| Field | UltraCode value | Meaning |
+|-------|-----------------|---------|
+| `output_config.effort` | `"xhigh"` | maximum reasoning effort |
+| `thinking` | `{"type": "adaptive"}` | extended/adaptive thinking on |
+| `max_tokens` | `>= 64000` | room for long, thorough answers |
+| `system` | + an *"Ultracode is on…"* reminder block | steers toward the Workflow/quality harness |
 
-(Evidence: captured request bodies for `xhigh` vs `ultracode:true` were identical;
-the recovered `/effort` logic maps `ultracode → {value:"xhigh", ultracode:true}`;
-the settings schema describes ultracode as "xhigh effort plus standing
-dynamic-workflow orchestration … requires an xhigh-capable model.")
+That's it. Anything that speaks the Anthropic Messages API and honors those
+fields gets the UltraCode treatment. Because it's just request shape, we can put
+the *same* envelope on a request and then forward it to **any** backend.
 
-## The two jobs of the proxy
+## 2. The proxy
 
-`gateway/ultracode_proxy.py` is a small standard-library HTTP server you point
-`ANTHROPIC_BASE_URL` at. It does two things:
+`proxy.py` is a standard-library HTTP server you point Claude Code at via
+`ANTHROPIC_BASE_URL` (the launchers do this for you). For every request it:
 
-### 1. Make any model selectable (`GET /v1/models` discovery)
+1. **Forces the envelope** on `POST /v1/messages` — sets `effort=xhigh`, adaptive
+   `thinking`, raises `max_tokens` to the floor (default 64000), and injects the
+   reminder if it isn't already present. (Toggle with `UC_FORCE_EFFORT`,
+   `UC_FORCE_THINKING`, `UC_MAX_TOKENS`, `UC_INJECT_REMINDER`.)
+2. **Serves `GET /v1/models`**, merging Anthropic's real model list with your
+   own entries from `config.json` so they show up in the `/model` picker.
+3. **Routes** each model id Claude Code sends to a real backend, per the
+   `routes` map in `config.json`.
 
-Claude Code has a built-in "gateway model discovery" feature. When
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, `ANTHROPIC_BASE_URL` points away
-from `api.anthropic.com`, and you're on a first-party (OAuth) login, the client
-calls `GET <base_url>/v1/models`, keeps every id matching `/^(claude|anthropic)/i`,
-and lists each one in `/model` using its `display_name`.
+## 3. Why your models appear in `/model` (gateway discovery)
 
-So the proxy serves `/v1/models` = the real Anthropic list **plus** your custom
-models from `config/ultracode_models.json`. That's why your model **ids must start
-with `claude` or `anthropic`** — otherwise the client filters them out before you
-ever see them. The launcher also seeds Claude Code's
-`<config>/cache/gateway-models.json` so your models appear on the very first open.
+Recent Claude Code supports **gateway model discovery**: when
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, it calls `GET /v1/models` on the
+gateway and lists what comes back in `/model`. The launchers set that env var and
+also pre-seed Claude Code's `cache/gateway-models.json` so your models show on
+the very first open.
 
-### 2. Add the envelope + route the pick (`POST /v1/messages`)
+> **Hard rule from Claude Code:** discovered ids are filtered with
+> `/^(claude|anthropic)/i`. Any model id that does **not** start with `claude`
+> or `anthropic` is silently dropped. That's why every `id` in `config.json`
+> looks like `claude-mimo`, `claude-openrouter`, etc.
 
-On every `/v1/messages` request the proxy:
+Gateway discovery only triggers on a first-party (OAuth) login, not on a raw
+`ANTHROPIC_API_KEY`.
 
-1. Applies the UltraCode envelope (xhigh / adaptive / max_tokens floor / reminder).
-2. Looks up the model id in `config/ultracode_slots.json` and routes it:
-   - **passthrough** — forward to an Anthropic-compatible upstream, keeping the
-     caller's credential (used for real Claude).
-   - **openai_compat** — translate the Anthropic request to OpenAI Chat
-     Completions, call the backend, and translate the streamed response back —
-     **including tool calls** (Anthropic `tool_use`/`tool_result` ⇄ OpenAI
-     `tool_calls`/`role:tool`). This is what lets MiMo/OpenRouter/etc. drive
-     Claude Code's tools correctly.
-   - **codex_oauth** — talk to the Codex Responses API using a `codex login`
-     token (see `gateway/providers/codex_oauth.py`).
+## 4. Routing each pick to a real backend
 
-```
-Claude Code ──▶ /v1/messages (model="claude-mimo")
-              │  proxy: + xhigh/adaptive/64k/reminder
-              │  slot "claude-mimo" → openai_compat → https://.../v1/chat/completions
-              ▼
-            MiMo  ──streamed tool_calls/text──▶ proxy ──Anthropic SSE──▶ Claude Code
-```
+When you pick a model, Claude Code sends its id as `model`. The proxy looks that
+id up in `config.json` → `routes` and forwards accordingly:
 
-## Why your normal Claude Code is safe
+- **Anthropic passthrough** (no `type`, or `type: "anthropic"`) — forwards the
+  request unchanged to `upstream` (default `api.anthropic.com`, i.e. real
+  Claude) or any Anthropic-compatible endpoint. Tools work natively.
+- **`openai_compat`** — translates the Anthropic request to an OpenAI
+  Chat Completions request, POSTs it to `upstream + /chat/completions`, and
+  translates the response back. **Tool calls are translated both ways**
+  (Anthropic `tool_use`/`tool_result` ⇄ OpenAI `tool_calls`/`role:tool`), and
+  streaming SSE is re-emitted as Anthropic SSE. This covers MiMo, DeepSeek,
+  StepFun, Ollama, OpenRouter, OpenAI, local llama.cpp/LM Studio, etc.
+- **`codex_oauth`** — sends to GPT‑5.5 via your ChatGPT/Codex *login* (no API
+  key), using `providers/codex_oauth.py` and the token from `codex login`.
+- **`cursor_agent`** (experimental) — bridges to Cursor's Composer through the
+  `cursor-agent` CLI via `providers/cursor_agent.py`. Reasoning works well;
+  tool-calling is a best-effort text bridge.
 
-The launcher sets `ANTHROPIC_BASE_URL` and the discovery flag **only for the
-process it spawns**, and passes a session-scoped `--settings` file containing
-`{"ultracode": true}`. It does not edit your global `~/.claude` config or your
-credentials. Close the UltraCode window (or use the "Claude Code (Normal)" icon)
-and you're back to stock behavior.
+## 5. What touches your machine
 
-## Files
+- The launchers set env (`ANTHROPIC_BASE_URL`, discovery flag) for **the launched
+  process only** and pass Claude Code a session-scoped `--settings` file. Your
+  global `~/.claude` config and credentials are never modified.
+- `config.json` (your keys/choices) is **gitignored**.
+- The proxy is stopped when Claude Code exits.
 
-| File | Role |
+## File map
+
+| Path | What |
 |------|------|
-| `gateway/ultracode_proxy.py` | the interceptor (envelope + discovery + routing). Stdlib only. |
-| `gateway/providers/codex_oauth.py` | optional GPT‑5.5-via-ChatGPT-login helper. Stdlib only. |
-| `gateway/test_proxy.py` | offline end-to-end self-test (no network/keys). |
-| `config/ultracode_models.json` | what appears in `/model`. |
-| `config/ultracode_slots.json` | where each model id is routed. |
-| `config/ultracode.env` | API keys (gitignored), referenced as `${VAR}`. |
-| `windows/Start-UltraCode.ps1` / `bin/ultracode` | start proxy + launch Claude Code. |
+| `proxy.py` | the interceptor: envelope + `/v1/models` discovery + routing. Stdlib only. |
+| `providers/codex_oauth.py` | optional GPT‑5.5-via-ChatGPT-login helper. Stdlib only. |
+| `providers/cursor_agent.py` | optional Cursor Composer bridge (experimental). Stdlib only. |
+| `config.json` | your models + routes + keys (copied from `config.example.json`; gitignored). |
+| `test_proxy.py` | offline end-to-end self-test (no network/keys). |
+| `scripts/doctor.py` | environment + config validator that runs the self-test. |
+| `windows/Start-UltraCode.ps1`, `bin/ultracode` | launchers (start proxy, run Claude Code, clean up). |

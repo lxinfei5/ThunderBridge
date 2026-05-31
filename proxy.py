@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ultracode_proxy.py -- Anthropic-API interceptor that gives Claude Code's
+proxy.py -- Anthropic-API interceptor that gives Claude Code's
 "UltraCode" behavior to ANY model and lets you pick those models from the
 /model menu.
 
@@ -17,18 +17,18 @@ Claude Code talks to ANTHROPIC_BASE_URL. Point that at this proxy and it:
      UltraCode is at the API boundary -- there is no secret model or field.)
 
   2. Serves GET /v1/models, merging the real Anthropic list with your own
-     custom models (UC_MODELS_FILE). With Claude Code's gateway model
+     custom models (config.json "models"). With Claude Code's gateway model
      discovery enabled (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) those
      custom models appear in the /model picker. NOTE: Claude Code only keeps
      model ids matching /^(claude|anthropic)/i, so every custom id MUST start
      with "claude" or "anthropic".
 
-  3. Routes each model id Claude Code sends to a real backend (UC_SLOT_MAP):
+  3. Routes each model id Claude Code sends to a real backend (config.json "routes"):
         - Anthropic passthrough  (real Claude, or any Anthropic endpoint)
         - openai_compat          (any OpenAI-compatible Chat Completions API,
                                    WITH full tool-calling translation)
         - codex_oauth            (GPT-5.5 via a ChatGPT/Codex login; needs the
-                                   optional gateway/providers/codex_oauth.py)
+                                   optional providers/codex_oauth.py)
 
 It is dependency-light: Python 3 standard library only. No pip install.
 
@@ -41,14 +41,14 @@ ENV KNOBS
   UC_FORCE_EFFORT    default xhigh   (set empty to leave effort untouched)
   UC_FORCE_THINKING  default 1       (1 => force adaptive thinking)
   UC_INJECT_REMINDER default 1       (1 => inject the ultracode reminder)
-  UC_MODELS_FILE     path to ultracode_models.json (custom /v1/models entries)
-  UC_SLOT_MAP        inline JSON or path to ultracode_slots.json (routing)
+  UC_CONFIG          path to config.json (default: config.json beside proxy.py,
+                     falling back to config.example.json)
   UC_MODEL_MAP       optional JSON, e.g. {"claude-opus-4-8":"my-model"}
   UC_LOG             optional log file path (default stderr)
   UC_VERBOSE         default 0
 
-SLOT MAP SHAPE (ultracode_slots.json)
--------------------------------------
+ROUTE SHAPE (config.json "routes" object)
+-----------------------------------------
   {
     "claude-opus-4-8":   {"model": "claude-opus-4-8",
                           "upstream": "https://api.anthropic.com",
@@ -67,7 +67,8 @@ SLOT MAP SHAPE (ultracode_slots.json)
            /chat/completions. passthrough: a base the inbound path is appended to.
   auth     "passthrough" (keep Claude Code's own credential) OR a literal
            header value: "Bearer ${KEY}" / "x-api-key: ${KEY}". ${VARS} are
-           expanded from the environment (load ultracode.env first).
+           expanded from the environment (export them, or use a gitignored
+           ultracode.env that the launchers load).
   headers  optional dict of extra request headers (values support ${VARS}).
   max_output_tokens  optional completion cap for openai_compat (default 8192).
 """
@@ -103,7 +104,7 @@ try:
 except Exception:
     UC_MODEL_MAP = {}
 
-# Optional Codex/ChatGPT OAuth helper (only needed for "codex_oauth" slots).
+# Optional Codex/ChatGPT OAuth helper (only needed for "codex_oauth" routes).
 try:
     from providers import codex_oauth as _codex_oauth  # type: ignore
 except Exception:
@@ -111,6 +112,15 @@ except Exception:
         import codex_oauth as _codex_oauth  # type: ignore
     except Exception:
         _codex_oauth = None
+
+# Optional Cursor Composer helper (only needed for "cursor_agent" routes).
+try:
+    from providers import cursor_agent as _cursor_agent  # type: ignore
+except Exception:
+    try:
+        import cursor_agent as _cursor_agent  # type: ignore
+    except Exception:
+        _cursor_agent = None
 
 
 _ENV_TOKEN = "${"
@@ -137,61 +147,59 @@ def _expand_env(value):
     return "".join(out)
 
 
-def _load_slot_map():
-    """UC_SLOT_MAP may be inline JSON or a path to a JSON file."""
-    raw = os.environ.get("UC_SLOT_MAP", "") or ""
-    if not raw.strip():
-        return {}
-    text = raw
-    if not raw.lstrip().startswith("{"):
-        try:
-            if os.path.isfile(raw):
-                with open(raw, "r", encoding="utf-8") as f:
-                    text = f.read()
-        except Exception as e:
-            log("UC_SLOT_MAP file read failed: %s" % e)
-            return {}
-    try:
-        data = json.loads(text)
-    except Exception as e:
-        log("UC_SLOT_MAP parse failed: %s" % e)
-        return {}
-    if not isinstance(data, dict):
-        return {}
+def _default_config_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("config.json", "config.example.json"):
+        p = os.path.join(here, name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(here, "config.json")
+
+
+def _strip_comments(obj):
+    """Drop keys that start with '_' (used for inline documentation)."""
+    if isinstance(obj, dict):
+        return {k: _strip_comments(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [_strip_comments(x) for x in obj]
+    return obj
+
+
+def load_config(path):
+    """Load the single config.json (proxy/models/routes), stripping comments."""
+    with open(path, "r", encoding="utf-8") as f:
+        return _strip_comments(json.load(f))
+
+
+def _routes_to_slots(routes):
+    """routes{} from config.json -> UC_SLOT_MAP. Expands ${ENV} in model/upstream/auth/headers."""
     out = {}
-    for k, v in data.items():
-        if k.startswith("_"):  # _comment / _fields metadata keys
+    if not isinstance(routes, dict):
+        return out
+    for mid, route in routes.items():
+        if not isinstance(route, dict):
             continue
-        if isinstance(v, dict):
-            slot = dict(v)
-            for key in ("model", "upstream", "auth"):
-                if key in slot:
-                    slot[key] = _expand_env(slot[key])
-            out[k] = slot
-        elif isinstance(v, str):
-            out[k] = {"model": _expand_env(v)}
+        slot = {}
+        if route.get("model"):
+            slot["model"] = _expand_env(route["model"])
+        if route.get("upstream"):
+            slot["upstream"] = _expand_env(route["upstream"]).rstrip("/")
+        auth = route.get("auth")
+        if auth and auth != "passthrough":
+            slot["auth"] = _expand_env(auth)
+        if route.get("type"):
+            slot["type"] = route["type"]
+        if route.get("max_output_tokens"):
+            slot["max_output_tokens"] = route["max_output_tokens"]
+        if isinstance(route.get("headers"), dict):
+            slot["headers"] = {k: _expand_env(v) for k, v in route["headers"].items()}
+        out[mid] = slot
     return out
 
 
-def _load_models():
-    """UC_MODELS_FILE points to {"models":[{"id","display_name"}]}."""
-    path = os.environ.get("UC_MODELS_FILE", "") or ""
-    if not path.strip():
-        return []
-    try:
-        if not os.path.isfile(path):
-            log("UC_MODELS_FILE not found: %s" % path)
-            return []
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.loads(f.read())
-    except Exception as e:
-        log("UC_MODELS_FILE read/parse failed: %s" % e)
-        return []
-    items = data.get("models") if isinstance(data, dict) else data
-    if not isinstance(items, list):
-        return []
+def _models_from_config(models):
     out = []
-    for m in items:
+    for m in models or []:
         if not isinstance(m, dict):
             continue
         mid = m.get("id")
@@ -719,6 +727,9 @@ class Handler(BaseHTTPRequestHandler):
             if rtype == "codex_oauth":
                 self._handle_codex(body, route)
                 return
+            if rtype == "cursor_agent":
+                self._handle_cursor_agent(body, route)
+                return
 
         # Anthropic passthrough.
         upstream = route.get("upstream") or UPSTREAM
@@ -820,8 +831,8 @@ class Handler(BaseHTTPRequestHandler):
         if _codex_oauth is None:
             self._send_error(
                 501,
-                "codex_oauth slot requires gateway/providers/codex_oauth.py and a "
-                "ChatGPT/Codex login (run: codex login). See docs/SETUP.md.")
+                "codex_oauth route requires providers/codex_oauth.py and a "
+                "ChatGPT/Codex login (run: codex login). See docs/ADD_A_MODEL.md.")
             return
         try:
             anth = json.loads(body.decode("utf-8"))
@@ -841,6 +852,38 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log("codex helper error: %s" % e)
             self._emit_or_error(want_stream, model_id, 502, "codex helper error: %s" % e)
+            return
+        if want_stream:
+            self._stream_anthropic_from_events(events, model_id)
+        else:
+            self._json_anthropic_from_events(events, model_id)
+
+    # ---- cursor_agent backend (Cursor Composer via the cursor-agent CLI) ----
+    def _handle_cursor_agent(self, body: bytes, route: dict):
+        if _cursor_agent is None:
+            self._send_error(
+                501,
+                "cursor_agent route requires providers/cursor_agent.py and the "
+                "cursor-agent CLI (cursor-agent login). See docs/ADD_A_MODEL.md.")
+            return
+        try:
+            anth = json.loads(body.decode("utf-8"))
+        except Exception as e:
+            self._send_error(400, "cursor_agent: bad request body: %s" % e)
+            return
+        model_id = anth.get("model") or route.get("model") or "composer-2.5"
+        want_stream = bool(anth.get("stream", False))
+        oai_body = anthropic_to_openai(anth)
+        try:
+            events = _cursor_agent.stream_events(
+                messages=oai_body.get("messages") or [],
+                tools=oai_body.get("tools"),
+                model=route.get("model") or "composer-2.5",
+                workspace=route.get("workspace"),
+            )
+        except Exception as e:
+            log("cursor_agent helper error: %s" % e)
+            self._emit_or_error(want_stream, model_id, 502, "cursor_agent helper error: %s" % e)
             return
         if want_stream:
             self._stream_anthropic_from_events(events, model_id)
@@ -1037,24 +1080,43 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global UC_SLOT_MAP, UC_MODELS
-    UC_SLOT_MAP = _load_slot_map()
-    UC_MODELS = _load_models()
+    global UC_SLOT_MAP, UC_MODELS, LISTEN_PORT, UPSTREAM, MAX_TOKENS_FLOOR
+    cfg_path = os.environ.get("UC_CONFIG", "") or _default_config_path()
+    try:
+        cfg = load_config(cfg_path)
+        log("config: %s" % cfg_path)
+    except FileNotFoundError:
+        cfg = {}
+        log("config not found (%s); copy config.example.json to config.json" % cfg_path)
+    except Exception as e:
+        cfg = {}
+        log("config parse failed (%s): %s -- continuing with defaults" % (cfg_path, e))
+
+    proxy_cfg = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
+    # Precedence: explicit env var > config.json > built-in default.
+    if "UC_LISTEN_PORT" not in os.environ and proxy_cfg.get("listen_port"):
+        LISTEN_PORT = int(proxy_cfg["listen_port"])
+    if "UC_UPSTREAM" not in os.environ and proxy_cfg.get("anthropic_upstream"):
+        UPSTREAM = str(proxy_cfg["anthropic_upstream"]).rstrip("/")
+    if "UC_MAX_TOKENS" not in os.environ and proxy_cfg.get("max_tokens_floor"):
+        MAX_TOKENS_FLOOR = int(proxy_cfg["max_tokens_floor"])
+
+    UC_SLOT_MAP = _routes_to_slots(cfg.get("routes"))
+    UC_MODELS = _models_from_config(cfg.get("models"))
     if UC_MODELS:
-        log("  advertising %d custom model(s) on GET /v1/models:" % len(UC_MODELS))
+        log("  advertising %d model(s) on GET /v1/models:" % len(UC_MODELS))
         for m in UC_MODELS:
             log("    %s  (%s)" % (m["id"], m["display_name"]))
     else:
-        log("  no UC_MODELS_FILE set (GET /v1/models passes through unchanged)")
-    if UC_SLOT_MAP:
-        for mid, slot in UC_SLOT_MAP.items():
-            log("  slot %s -> type=%s model=%s upstream=%s"
-                % (mid, slot.get("type", "passthrough"), slot.get("model", mid),
-                   slot.get("upstream", "(default)")))
-    else:
-        log("  no UC_SLOT_MAP set (single-upstream mode)")
+        log("  no models configured (GET /v1/models passes through unchanged)")
+    for mid, slot in UC_SLOT_MAP.items():
+        log("  route %s -> type=%s model=%s upstream=%s"
+            % (mid, slot.get("type", "anthropic"), slot.get("model", mid),
+               slot.get("upstream", "(default)")))
     if _codex_oauth is None:
-        log("  codex_oauth helper not importable (codex_oauth slots will 501)")
+        log("  codex_oauth helper not importable (codex_oauth routes will 501)")
+    if _cursor_agent is None:
+        log("  cursor_agent helper not importable (cursor_agent routes will 501)")
     httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     log("ultracode-proxy listening on http://%s:%d -> %s"
         % (LISTEN_HOST, LISTEN_PORT, UPSTREAM))

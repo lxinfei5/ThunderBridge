@@ -1,126 +1,145 @@
 # Add a model
 
-Adding a backend to the `/model` menu is always the same three edits:
+Everything lives in one file: **`config.json`** (copied from
+`config.example.json` on first run). To add a backend you edit two sections:
 
-1. Add an entry to `config/ultracode_models.json` (what shows in the picker).
-2. Add a matching route to `config/ultracode_slots.json` (where it goes).
-3. If it uses an API key, add the key to `config/ultracode.env` and reference it
-   as `${VAR}` in the slot.
+1. **`models`** — what appears in Claude Code's `/model` picker.
+2. **`routes`** — where each of those ids actually goes.
 
-Then re-run `python scripts/doctor.py` and relaunch.
-
-> **The golden rule:** the model `id` **must start with `claude` or `anthropic`**,
-> and the `id` in `ultracode_models.json` must exactly equal the **key** in
-> `ultracode_slots.json`. Otherwise the model won't show up or won't route.
-
----
-
-## Pattern A — any OpenAI-compatible API (most models)
-
-Covers MiMo, OpenRouter, OpenAI, Together, Groq, DeepInfra, a local
-llama.cpp/Ollama server — anything exposing `POST /v1/chat/completions`. Tool
-calls are translated automatically.
-
-`ultracode_models.json`
-```json
-{ "id": "claude-mymodel", "display_name": "My Model (OpenRouter)" }
+```jsonc
+{
+  "models": [
+    { "id": "claude-mimo", "display_name": "MiMo v2.5 Pro" }
+  ],
+  "routes": {
+    "claude-mimo": {
+      "type": "openai_compat",
+      "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
+      "model": "mimo-v2.5-pro",
+      "auth": "Bearer ${MIMO_API_KEY}"
+    }
+  }
+}
 ```
 
-`ultracode_slots.json`
+> **Two rules you must follow:**
+> 1. Every `id` in `models` **must start with `claude` or `anthropic`** — Claude
+>    Code drops everything else from `/model`.
+> 2. The `id` in `models` must **exactly equal** the key in `routes`. Otherwise
+>    the model won't appear or won't route.
+>
+> Run `python scripts/doctor.py` and it checks both for you.
+
+## Where keys go
+
+`config.json` is gitignored, so you can put a key **inline**:
+
 ```json
-"claude-mymodel": {
+"auth": "Bearer sk-...your-real-key..."
+```
+
+…or keep it out of the file with **`${ENV}`** expansion:
+
+```json
+"auth": "Bearer ${MIMO_API_KEY}"
+```
+
+`${VAR}` is read from your environment. The launchers also load an optional
+gitignored **`ultracode.env`** in the repo root, so you can keep keys there:
+
+```
+MIMO_API_KEY=...
+OPENROUTER_API_KEY=...
+```
+
+## Route types
+
+### `openai_compat` — anything that speaks OpenAI Chat Completions
+
+MiMo, DeepSeek, StepFun, Ollama Cloud, OpenRouter, OpenAI, Together, a local
+llama.cpp / LM Studio server, etc. Tool calls are translated both ways.
+
+```json
+"claude-openrouter": {
   "type": "openai_compat",
-  "model": "vendor/the-real-model-id",
   "upstream": "https://openrouter.ai/api/v1",
+  "model": "meta-llama/llama-3.3-70b-instruct",
   "auth": "Bearer ${OPENROUTER_API_KEY}"
 }
 ```
 
-`ultracode.env`
-```
-OPENROUTER_API_KEY=sk-or-...
-```
-
-Notes:
+- `upstream` is the OpenAI **base URL exactly as the provider documents it**
+  (usually ends in `/v1`). The proxy appends `/chat/completions`.
 - `model` is the backend's real model id, **not** the `claude-…` alias.
-- `upstream` is the OpenAI base URL **as the provider documents it** (it usually
-  ends in `/v1`); the proxy appends `/chat/completions`. Don't add `/chat/completions` yourself.
-- Some backends use a header instead of Bearer — use `"auth": "x-api-key: ${MY_KEY}"`.
-- Some gateways need a specific header (e.g. a `User-Agent`); add
-  `"headers": { "User-Agent": "..." }` to the slot.
-- Output length defaults to a safe 8192 tokens. If your backend allows more (or
-  rejects that), add `"max_output_tokens": 16384` (or lower) to the slot.
-- Local server example: `"upstream": "http://127.0.0.1:11434/v1", "auth": "Bearer ${LOCAL_API_KEY}"`
-  (Ollama/llama.cpp ignore the key; any value works).
+- Optional: `headers` (a dict, values support `${VARS}`) and `max_output_tokens`
+  (completion cap, default 8192 — raise it if a backend supports longer output).
 
-## Pattern B — GPT‑5.5 via ChatGPT/Codex login (no API key)
+A **local** server is the same, with a usually-ignored key:
 
-`ultracode_models.json`
 ```json
-{ "id": "claude-gpt-5.5-codex", "display_name": "GPT-5.5 (Codex OAuth)" }
+"claude-local": {
+  "type": "openai_compat",
+  "upstream": "http://127.0.0.1:11434/v1",
+  "model": "your-local-model",
+  "auth": "Bearer local"
+}
 ```
 
-`ultracode_slots.json`
+### Anthropic passthrough — real Claude or an Anthropic-compatible endpoint
+
+Omit `type` (or set `"anthropic"`). With no `auth`/`upstream` it's just real
+Claude with the UltraCode envelope. You can also point at an Anthropic-shaped
+gateway and add headers:
+
+```json
+"claude-opencode": {
+  "upstream": "https://opencode.ai/zen/go",
+  "model": "claude-sonnet-4-5",
+  "auth": "Bearer ${OPENCODE_API_KEY}",
+  "headers": { "User-Agent": "openclaw/2026.4.20" }
+}
+```
+
+### `codex_oauth` — GPT‑5.5 via a ChatGPT/Codex login (no API key)
+
 ```json
 "claude-gpt-5.5-codex": { "type": "codex_oauth", "model": "gpt-5.5" }
 ```
 
-Then run `codex login` once. Optional env knobs (set in `ultracode.env`):
-`UC_CODEX_EFFORT=high`, `UC_CODEX_SERVICE_TIER=priority`.
+Run `codex login` once (creates `~/.codex/auth.json`). No `auth`/`upstream`
+needed. Optional env knobs: `UC_CODEX_EFFORT`, `UC_CODEX_SERVICE_TIER`,
+`CODEX_HOME`.
 
-## Pattern C — real Claude / any Anthropic-compatible endpoint
-
-Omit `type` for passthrough (keeps Claude Code's own login):
+### `cursor_agent` — Cursor Composer (experimental)
 
 ```json
-"claude-opus-4-8": {
-  "model": "claude-opus-4-8",
-  "upstream": "https://api.anthropic.com",
-  "auth": "passthrough"
-}
+"claude-composer": { "type": "cursor_agent", "model": "composer-2.5" }
 ```
 
----
+Needs the `cursor-agent` CLI and `cursor-agent login`. It's an autonomous agent,
+not a plain endpoint, so we run it in read-only "ask" mode and bridge tool calls
+as text markers — great for reasoning/answers, best-effort for tool-calling.
 
-## Popular backends (already in the example config)
+## What ships in the example
 
-The shipped `config/*.example.json` includes ready-to-use entries — keep the ones
-you have a plan for and delete the rest. Endpoints/model ids were accurate at time
-of writing; check the provider's docs if something 404s.
+`config.example.json` includes ready-to-use entries — keep the ones you have a
+plan/key for and delete the rest:
 
-| Picker label | id | `type` | `upstream` | `model` | key in `ultracode.env` |
-|---|---|---|---|---|---|
-| GPT‑5.5 (Codex OAuth) | `claude-gpt-5.5-codex` | `codex_oauth` | — | `gpt-5.5` | none (`codex login`) |
-| MiMo v2.5 Pro | `claude-mimo` | `openai_compat` | `https://token-plan-sgp.xiaomimimo.com/v1` | `mimo-v2.5-pro` | `MIMO_API_KEY` |
-| DeepSeek V4 Pro | `claude-deepseek-v4-pro` | `openai_compat` | `https://api.deepseek.com/v1` | `deepseek-v4-pro` | `DEEPSEEK_API_KEY` |
-| DeepSeek V4 Flash | `claude-deepseek-v4-flash` | `openai_compat` | `https://api.deepseek.com/v1` | `deepseek-v4-flash` | `DEEPSEEK_API_KEY` |
-| Step Flash | `claude-step-flash` | `openai_compat` | `https://api.stepfun.ai/v1` | `step-3.5-flash` | `STEPFUN_API_KEY` |
-| Ollama Cloud | `claude-ollama-cloud` | `openai_compat` | `https://ollama.com/v1` | `gpt-oss:120b` (or any cloud model) | `OLLAMA_API_KEY` |
-| OpenCode Go | `claude-opencode` | *(passthrough)* | `https://opencode.ai/zen/go` | the id your plan exposes | `OPENCODE_API_KEY` |
-| OpenRouter | `claude-openrouter` | `openai_compat` | `https://openrouter.ai/api/v1` | any OpenRouter slug | `OPENROUTER_API_KEY` |
-| Local | `claude-local` | `openai_compat` | `http://127.0.0.1:11434/v1` | your local model | `LOCAL_API_KEY` |
+| Picker label | id | `type` | backend |
+|--------------|----|--------|---------|
+| GPT-5.5 (Codex OAuth) | `claude-gpt-5.5-codex` | `codex_oauth` | `codex login` |
+| MiMo v2.5 Pro | `claude-mimo` | `openai_compat` | Xiaomi MiMo |
+| DeepSeek V4 Pro/Flash | `claude-deepseek-v4-*` | `openai_compat` | DeepSeek |
+| Step Flash | `claude-step-flash` | `openai_compat` | StepFun |
+| Ollama Cloud | `claude-ollama-cloud` | `openai_compat` | Ollama Cloud |
+| Claude via OpenCode Go | `claude-opencode` | passthrough | OpenCode Go |
+| Llama 3.3 70B (OpenRouter) | `claude-openrouter` | `openai_compat` | OpenRouter |
+| Local model | `claude-local` | `openai_compat` | local server |
+| Composer 2.5 (experimental) | `claude-composer` | `cursor_agent` | cursor-agent |
 
-OpenCode Go is Anthropic-native, so it's a **passthrough** slot with a
-`User-Agent` header; set `model` to whatever id your OpenCode plan exposes.
+After editing, validate and launch:
 
-## Composer 2.5 Fast (Cursor) — advanced / not plug-and-play
-
-Cursor's Composer is **not** an OpenAI/Anthropic HTTP API — it's driven by the
-`cursor-agent` CLI. Routing Claude Code's tool-using harness through it needs a
-subprocess bridge (translating `cursor-agent`'s stream to tool calls), which this
-repo does **not** ship yet. It's on the roadmap; if you want it, open an issue.
-Everything HTTP-based (the table above) works today.
-
-## Field reference
-
-| Field | Meaning |
-|-------|---------|
-| `type` | omit = Anthropic passthrough · `openai_compat` · `codex_oauth` |
-| `model` | the id sent to the backend |
-| `upstream` | backend base URL (ignored for `codex_oauth`) |
-| `auth` | `passthrough`, or `Bearer ${VAR}` / `x-api-key: ${VAR}` |
-| `max_output_tokens` | optional (`openai_compat`); completion cap sent to backend (default 8192) |
-| `label` | human note only; never sent |
-
-After editing, validate with `python scripts/doctor.py` — it checks that every
-advertised id is routed and that every `${VAR}` you referenced is set.
+```
+python scripts/doctor.py
+windows\Start-UltraCode.ps1      # or  ./bin/ultracode  on mac/linux
+```

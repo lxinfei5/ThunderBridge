@@ -20,8 +20,11 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-GATEWAY = REPO / "gateway"
-CONFIG = REPO / "config"
+PROXY = REPO / "proxy.py"
+TEST = REPO / "test_proxy.py"
+CONFIG = REPO / "config.json"
+CONFIG_EXAMPLE = REPO / "config.example.json"
+ENV_FILE = REPO / "ultracode.env"
 
 OK = "[ok]  "
 NOTE = "[note]"
@@ -35,6 +38,7 @@ def fail(m): counts.__setitem__("fail", counts["fail"] + 1); print(FAIL, m, flus
 
 
 def load_env_file(p: Path):
+    """Optionally load an `ultracode.env` (gitignored) so ${VAR} refs resolve."""
     if not p.is_file():
         return
     for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -44,8 +48,21 @@ def load_env_file(p: Path):
             os.environ.setdefault(k.strip(), v.strip())
 
 
-def referenced_vars(s: str):
-    return re.findall(r"\$\{([^}]+)\}", s or "")
+def strip_comments(obj):
+    """Drop keys starting with '_' (inline documentation in config.json)."""
+    if isinstance(obj, dict):
+        return {k: strip_comments(v) for k, v in obj.items() if not str(k).startswith("_")}
+    if isinstance(obj, list):
+        return [strip_comments(x) for x in obj]
+    return obj
+
+
+def referenced_vars(s):
+    return re.findall(r"\$\{([^}]+)\}", s or "") if isinstance(s, str) else []
+
+
+def looks_like_placeholder(s):
+    return isinstance(s, str) and bool(re.search(r"REPLACE_WITH|your-|YOUR_", s))
 
 
 def main():
@@ -66,13 +83,12 @@ def main():
         fail("python >= 3.8 required; found %d.%d" % sys.version_info[:2])
 
     # 2. proxy present + compiles
-    proxy = GATEWAY / "ultracode_proxy.py"
-    if proxy.is_file():
-        rc = subprocess.run([sys.executable, "-m", "py_compile", str(proxy)]).returncode
-        ok("gateway/ultracode_proxy.py present and compiles") if rc == 0 \
-            else fail("gateway/ultracode_proxy.py has a syntax error")
+    if PROXY.is_file():
+        rc = subprocess.run([sys.executable, "-m", "py_compile", str(PROXY)]).returncode
+        ok("proxy.py present and compiles") if rc == 0 \
+            else fail("proxy.py has a syntax error")
     else:
-        fail("missing gateway/ultracode_proxy.py")
+        fail("missing proxy.py")
 
     # 3. claude CLI
     if shutil.which("claude"):
@@ -82,69 +98,77 @@ def main():
     else:
         fail("claude CLI not found - install: npm i -g @anthropic-ai/claude-code")
 
-    # 4. config: load env, resolve slots/models (fall back to examples)
-    load_env_file(CONFIG / "ultracode.env")
-    slots_path = CONFIG / "ultracode_slots.json"
-    models_path = CONFIG / "ultracode_models.json"
+    # 4. config: load optional env, pick config.json (fall back to the example)
+    load_env_file(ENV_FILE)
+    cfg_path = CONFIG
     using_example = False
-    if not slots_path.is_file():
-        slots_path = CONFIG / "ultracode_slots.example.json"
-        models_path = CONFIG / "ultracode_models.example.json"
+    if not cfg_path.is_file():
+        cfg_path = CONFIG_EXAMPLE
         using_example = True
-        note("no config/ultracode_slots.json yet - validating the .example "
-             "(the launcher copies it on first run)")
+        note("no config.json yet - validating config.example.json "
+             "(the launcher copies it to config.json on first run)")
 
-    slots = {}
-    models = []
+    cfg = {}
     try:
-        raw = json.loads(slots_path.read_text(encoding="utf-8"))
-        slots = {k: v for k, v in raw.items() if not k.startswith("_")}
-        ok("slots file parses: %s (%d slots)" % (slots_path.name, len(slots)))
+        cfg = strip_comments(json.loads(cfg_path.read_text(encoding="utf-8")))
+        ok("config parses: %s" % cfg_path.name)
     except Exception as e:
-        fail("could not parse %s: %s" % (slots_path.name, e))
-    try:
-        models = (json.loads(models_path.read_text(encoding="utf-8")) or {}).get("models", [])
-        ok("models file parses: %s (%d models)" % (models_path.name, len(models)))
-    except Exception as e:
-        fail("could not parse %s: %s" % (models_path.name, e))
+        fail("could not parse %s: %s" % (cfg_path.name, e))
 
-    # 5. discovery rule: ids must start with claude/anthropic; must be routed
+    models = cfg.get("models") if isinstance(cfg.get("models"), list) else []
+    routes = cfg.get("routes") if isinstance(cfg.get("routes"), dict) else {}
+    ok("config has %d model(s) and %d route(s)" % (len(models), len(routes)))
+
+    # 5. discovery rule: ids must start with claude/anthropic and be routed
     model_ids = [m.get("id") for m in models if isinstance(m, dict)]
+    discovery_fails = 0
     for mid in model_ids:
         if not re.match(r"^(claude|anthropic)", mid or "", re.I):
             fail("model id '%s' will NOT appear in /model (must start with 'claude' or 'anthropic')" % mid)
-        if mid not in slots:
-            fail("model '%s' has no route in slots - add a matching entry" % mid)
-    if model_ids and counts["fail"] == 0:
+            discovery_fails += 1
+        if mid not in routes:
+            fail("model '%s' has no entry in routes - add a matching route" % mid)
+            discovery_fails += 1
+    if model_ids and discovery_fails == 0:
         ok("all advertised model ids are discoverable and routed")
 
-    # 6. per-slot backend checks
-    for name, slot in slots.items():
-        if not isinstance(slot, dict):
+    # 6. per-route backend checks
+    for name, route in routes.items():
+        if not isinstance(route, dict):
             continue
-        stype = slot.get("type", "passthrough")
-        if stype == "codex_oauth":
+        rtype = route.get("type", "anthropic")
+        if rtype == "codex_oauth":
             auth = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json"
-            if auth.is_file():
-                ok("slot '%s': Codex login found (%s)" % (name, auth))
-            else:
-                note("slot '%s': no %s - run `codex login` before using it" % (name, auth))
+            ok("route '%s': Codex login found (%s)" % (name, auth)) if auth.is_file() \
+                else note("route '%s': no %s - run `codex login` before using it" % (name, auth))
             continue
-        # Any slot may reference ${VARS} in auth or header values.
-        refs = set(referenced_vars(slot.get("auth", "")))
-        for hv in (slot.get("headers") or {}).values():
+        if rtype == "cursor_agent":
+            binp = (os.environ.get("CURSOR_AGENT_BIN") or shutil.which("cursor-agent")
+                    or str(Path.home() / ".local" / "bin" / "cursor-agent"))
+            ok("route '%s': cursor-agent found (%s)" % (name, binp)) if (binp and Path(binp).exists()) \
+                else note("route '%s': cursor-agent not found - install it and run "
+                          "`cursor-agent login` (this backend is experimental)" % name)
+            continue
+        # anthropic passthrough or openai_compat: validate the credential.
+        auth = route.get("auth", "")
+        refs = set(referenced_vars(auth))
+        for hv in (route.get("headers") or {}).values():
             refs.update(referenced_vars(hv))
         for var in sorted(refs):
             if os.environ.get(var):
-                ok("slot '%s': key %s is set" % (name, var))
+                ok("route '%s': env var %s is set" % (name, var))
             elif using_example:
-                note("slot '%s': %s not set yet (example backend; set it in "
-                     "config/ultracode.env once you keep this slot)" % (name, var))
+                note("route '%s': %s not set yet (example backend; set it once you keep this route)" % (name, var))
             else:
-                fail("slot '%s': %s is empty - set it in config/ultracode.env" % (name, var))
+                fail("route '%s': %s is empty - export it or put the key inline in config.json" % (name, var))
+        if not refs and looks_like_placeholder(auth):
+            note("route '%s': auth still has a placeholder (%s) - put your real key there"
+                 % (name, auth)) if using_example else \
+                fail("route '%s': auth still has a placeholder - replace it with your real key" % name)
 
     # 7. port free
-    port = int(os.environ.get("UC_LISTEN_PORT", "8141"))
+    proxy_cfg = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
+    port = int(os.environ.get("UC_LISTEN_PORT") or proxy_cfg.get("listen_port") or 8141)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     free = s.connect_ex(("127.0.0.1", port)) != 0
     s.close()
@@ -152,9 +176,9 @@ def main():
         note("port %d already in use - a proxy may already be running (fine), or pick another" % port)
 
     # 8. offline self-test
-    if not args.no_test and (GATEWAY / "test_proxy.py").is_file():
-        print("\nrunning offline self-test (gateway/test_proxy.py)...", flush=True)
-        rc = subprocess.run([sys.executable, str(GATEWAY / "test_proxy.py")]).returncode
+    if not args.no_test and TEST.is_file():
+        print("\nrunning offline self-test (test_proxy.py)...", flush=True)
+        rc = subprocess.run([sys.executable, str(TEST)]).returncode
         ok("self-test passed") if rc == 0 else fail("self-test failed (see output above)")
 
     print()
@@ -163,7 +187,7 @@ def main():
         print("Fix the [FAIL] lines above, then re-run: python3 scripts/doctor.py")
         return 1
     if using_example:
-        print("Looks good. The launcher will create your editable config on first run.")
+        print("Looks good. Copy config.example.json to config.json and keep the models you have.")
     else:
         print("Ready. Launch: windows\\Start-UltraCode.ps1  (or  bin/ultracode  on mac/linux).")
     return 0

@@ -28,9 +28,10 @@ The proxy log is at:
 ### The model is listed but the answer is an error / empty
 
 - Check the proxy log (path above) for the upstream status line.
-- **401 / "invalid api key":** the key in `config/ultracode.env` is wrong/empty,
-  or the slot's `auth` header format is wrong. Re-run the doctor.
-- **404 / "model not found":** the slot's `model` isn't a valid id for that
+- **401 / "invalid api key":** the route's `auth` in `config.json` (or the
+  `${VAR}` it references) is wrong/empty, or the header format is wrong. Re-run
+  the doctor.
+- **404 / "model not found":** the route's `model` isn't a valid id for that
   backend (remember: it's the backend's id, not the `claude-…` alias), or
   `upstream` is wrong.
 - **Codex 401 / "run codex login":** your ChatGPT/Codex token expired — run
@@ -38,18 +39,19 @@ The proxy log is at:
 
 ### It replies in text but never calls tools
 
-The slot is probably **passthrough** (or pointing at a chat endpoint that drops
-tools). Set `"type": "openai_compat"` for that slot — the proxy then translates
+The route is probably **passthrough** (or pointing at a chat endpoint that drops
+tools). Set `"type": "openai_compat"` for that route — the proxy then translates
 Anthropic `tool_use`/`tool_result` ⇄ OpenAI `tool_calls` both ways. Real Claude
 (passthrough) already handles tools natively.
 
 ### "Proxy did not become healthy"
 
-- Another process is on the port. Pick another: set `UC_LISTEN_PORT` (env or
-  `ultracode.env`) and relaunch, or stop the stale `python … ultracode_proxy.py`.
+- Another process is on the port. Pick another: set `proxy.listen_port` in
+  `config.json` (or `UC_LISTEN_PORT`) and relaunch, or stop the stale
+  `python … proxy.py`.
 - Python not found. Ensure `python` (Windows) / `python3` (mac/linux) is on PATH.
 - Run the proxy in the foreground to see the error:
-  `python gateway/ultracode_proxy.py` (Ctrl-C to stop).
+  `python proxy.py` (Ctrl-C to stop).
 
 ### PowerShell won't run the script
 
@@ -74,7 +76,7 @@ the **"Claude Code (Normal)"** icon for the stock experience, or
 Run the offline self-test (no network, no keys):
 
 ```
-python gateway/test_proxy.py
+python test_proxy.py
 ```
 
 If that passes, the code is good and the problem is configuration/credentials. If

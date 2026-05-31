@@ -26,19 +26,18 @@ is good and you can configure your models. (It's safe to run the doctor anytime.
 
 ## 3. Configure your models
 
-The launcher copies `config/*.example.*` to real files on first run, but you can
-do it now:
+The launcher copies `config.example.json` to `config.json` on first run, but you
+can do it now:
 
 ```
-# from config/
-copy ultracode_models.example.json ultracode_models.json   # windows
-copy ultracode_slots.example.json  ultracode_slots.json
-copy ultracode.example.env         ultracode.env
-# (mac/linux: use cp)
+copy config.example.json config.json   # windows
+cp   config.example.json config.json   # mac/linux
 ```
 
-Edit them for the plans you have — see [ADD_A_MODEL.md](ADD_A_MODEL.md). Put API
-keys in `ultracode.env` (gitignored) and reference them as `${VAR}` in the slots.
+`config.json` is gitignored, so your keys never get committed. Edit it for the
+plans you have: keep the entries you want in `models` + `routes`, delete the rest,
+and put each key inline or as `${VAR}`. Full per-backend templates are in
+[ADD_A_MODEL.md](ADD_A_MODEL.md).
 
 ### GPT‑5.5 via ChatGPT/Codex login (optional)
 
