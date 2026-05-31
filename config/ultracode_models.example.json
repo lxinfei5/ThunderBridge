@@ -1,0 +1,14 @@
+{
+  "_comment": "Models advertised to Claude Code's /model picker via GET /v1/models. Copy this file to ultracode_models.json and KEEP ONLY the ones you have a plan/key for. RULES: (1) every id MUST start with 'claude' or 'anthropic' or Claude Code's discovery filter drops it; (2) 'display_name' is the picker label; (3) every id needs a matching route in ultracode_slots.json. real Anthropic models (claude-opus-4-8 etc.) already appear in /model on their own; you don't need to list them here.",
+  "models": [
+    { "id": "claude-gpt-5.5-codex",      "display_name": "GPT-5.5 (Codex OAuth)" },
+    { "id": "claude-mimo",               "display_name": "MiMo v2.5 Pro" },
+    { "id": "claude-deepseek-v4-pro",    "display_name": "DeepSeek V4 Pro" },
+    { "id": "claude-deepseek-v4-flash",  "display_name": "DeepSeek V4 Flash" },
+    { "id": "claude-step-flash",         "display_name": "Step 3.5 Flash" },
+    { "id": "claude-ollama-cloud",       "display_name": "GPT-OSS 120B (Ollama Cloud)" },
+    { "id": "claude-opencode",           "display_name": "Claude via OpenCode Go" },
+    { "id": "claude-openrouter",         "display_name": "Llama 3.3 70B (OpenRouter)" },
+    { "id": "claude-local",              "display_name": "Local model (llama.cpp / Ollama)" }
+  ]
+}

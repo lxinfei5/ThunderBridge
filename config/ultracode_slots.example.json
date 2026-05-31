@@ -1,0 +1,89 @@
+{
+  "_comment": "Routing for the ultracode proxy. KEY = the model id Claude Code sends (the id you put in ultracode_models.json and pick in /model). Copy to ultracode_slots.json and KEEP ONLY what you use. Secrets go in ultracode.env as ${VARS}, never inline. 'upstream' for openai_compat is the base URL from the provider's docs (usually ends in /v1); the proxy appends /chat/completions. The model ids below were accurate at time of writing - check your provider's docs and adjust.",
+  "_fields": {
+    "type": "omit = Anthropic passthrough; 'openai_compat' = any OpenAI Chat Completions backend (with tool-calling); 'codex_oauth' = GPT-5.5 via a ChatGPT/Codex login.",
+    "model": "the id the backend expects (not the claude-* alias).",
+    "upstream": "openai_compat: OpenAI base URL (ends in /v1). passthrough: base that the inbound path is appended to.",
+    "auth": "'passthrough', or 'Bearer ${KEY}' / 'x-api-key: ${KEY}'.",
+    "headers": "optional dict of extra request headers (values support ${VARS}); e.g. a User-Agent some gateways require.",
+    "max_output_tokens": "optional (openai_compat) completion cap, default 8192.",
+    "label": "human note; never sent."
+  },
+
+  "claude-opus-4-8": {
+    "label": "Real Anthropic Opus 4.8 with full UltraCode (your own Claude login).",
+    "model": "claude-opus-4-8",
+    "upstream": "https://api.anthropic.com",
+    "auth": "passthrough"
+  },
+
+  "claude-gpt-5.5-codex": {
+    "label": "GPT-5.5 via a ChatGPT/Codex login (run `codex login` once; no API key).",
+    "type": "codex_oauth",
+    "model": "gpt-5.5"
+  },
+
+  "claude-mimo": {
+    "label": "MiMo v2.5 Pro (Xiaomi token plan).",
+    "type": "openai_compat",
+    "model": "mimo-v2.5-pro",
+    "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
+    "auth": "Bearer ${MIMO_API_KEY}"
+  },
+
+  "claude-deepseek-v4-pro": {
+    "label": "DeepSeek V4 Pro (DeepSeek API).",
+    "type": "openai_compat",
+    "model": "deepseek-v4-pro",
+    "upstream": "https://api.deepseek.com/v1",
+    "auth": "Bearer ${DEEPSEEK_API_KEY}"
+  },
+
+  "claude-deepseek-v4-flash": {
+    "label": "DeepSeek V4 Flash (DeepSeek API).",
+    "type": "openai_compat",
+    "model": "deepseek-v4-flash",
+    "upstream": "https://api.deepseek.com/v1",
+    "auth": "Bearer ${DEEPSEEK_API_KEY}"
+  },
+
+  "claude-step-flash": {
+    "label": "StepFun Step Flash. Set 'model' to the id your plan exposes (e.g. step-3.5-flash).",
+    "type": "openai_compat",
+    "model": "step-3.5-flash",
+    "upstream": "https://api.stepfun.ai/v1",
+    "auth": "Bearer ${STEPFUN_API_KEY}"
+  },
+
+  "claude-ollama-cloud": {
+    "label": "Ollama Cloud plan. Swap 'model' for any cloud model (e.g. deepseek-v4-pro, qwen3-coder, gpt-oss:120b).",
+    "type": "openai_compat",
+    "model": "gpt-oss:120b",
+    "upstream": "https://ollama.com/v1",
+    "auth": "Bearer ${OLLAMA_API_KEY}"
+  },
+
+  "claude-opencode": {
+    "label": "OpenCode Go plan (Anthropic-native). Set 'model' to the id your OpenCode plan exposes.",
+    "model": "claude-sonnet-4-5",
+    "upstream": "https://opencode.ai/zen/go",
+    "auth": "Bearer ${OPENCODE_API_KEY}",
+    "headers": { "User-Agent": "openclaw/2026.4.20" }
+  },
+
+  "claude-openrouter": {
+    "label": "Any OpenRouter model - swap 'model' for any slug OpenRouter lists.",
+    "type": "openai_compat",
+    "model": "meta-llama/llama-3.3-70b-instruct",
+    "upstream": "https://openrouter.ai/api/v1",
+    "auth": "Bearer ${OPENROUTER_API_KEY}"
+  },
+
+  "claude-local": {
+    "label": "A local OpenAI-compatible server (Ollama :11434, llama.cpp :8080, LM Studio :1234). The key is usually ignored.",
+    "type": "openai_compat",
+    "model": "your-local-model",
+    "upstream": "http://127.0.0.1:11434/v1",
+    "auth": "Bearer ${LOCAL_API_KEY}"
+  }
+}

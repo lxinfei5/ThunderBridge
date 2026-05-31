@@ -1,103 +1,139 @@
 # UltraCode-Shim
 
-Run **Claude Code UltraCode** (Opus 4.8 gate, Workflow tool, deep-reasoning harness) while routing actual inference to a cheaper backend you choose — MiMo, Cursor Composer, or any model your local shim supports.
+Use Claude Code's **UltraCode** mode (xhigh effort + the Workflow/deep-reasoning
+harness) with **any model you already pay for** — pick it live from the `/model`
+menu.
 
-Claude Code only unlocks UltraCode for `claude-opus-4-8`. That model is expensive. This project gives you **one desktop icon per backend**: double-click, get the full UltraCode UX, pay the backend you picked.
+One icon. Open Claude Code, type `/model`, and choose any backend you've set up —
+all running with the full UltraCode harness. Your normal Claude Code install is
+left untouched.
 
-## How it works
+The example config ships ready-to-use entries for **GPT‑5.5 (Codex login)**,
+**MiMo v2.5 Pro**, **DeepSeek V4 Pro/Flash**, **Step Flash**, **Ollama Cloud**,
+**OpenCode Go**, **OpenRouter**, and **local models** — keep the ones you have a
+plan for, delete the rest. (Cursor's Composer needs the `cursor-agent` CLI and
+isn't HTTP-based — see [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
 
 ```
-Desktop .lnk  →  Windows .cmd  →  WSL launcher  →  local shim  →  backend model
-     │                │                 │                  │
-  MiMo icon      wsl.exe bash      claude-mimo-      byok_oai_shim    MiMo v2.5 Pro
-  Composer icon                   ultracode-video   /v1/messages     Composer 2.5 Fast
+  Claude Code  ──ANTHROPIC_BASE_URL──▶  ultracode_proxy (loopback)  ──▶  the model you picked
+   /model menu  ◀── GET /v1/models ──   (adds UltraCode envelope,        (MiMo / OpenRouter /
+                                         routes by your slot map)          Codex OAuth / local / Claude)
 ```
 
-1. **Claude Code** starts with `--model claude-opus-4-8` and `{"ultracode": true}` settings — passes the UltraCode gate.
-2. **`ANTHROPIC_BASE_URL`** points at a local shim on loopback (not Anthropic).
-3. **The shim** sees `model=claude-opus-4-8` plus `CLAUDE_CODE_ULTRACODE_BACKEND=<your-backend>` and routes to MiMo, Cursor Agent, etc.
-4. **Claude Code never knows** — it gets Anthropic-shaped SSE back with tool calls intact.
+> **How is this possible?** At the API level, "UltraCode" is just
+> `effort=xhigh` + adaptive thinking + a big `max_tokens` + one system reminder —
+> there is no secret model. The proxy adds that envelope to every request, so any
+> backend gets the UltraCode treatment. Full breakdown (with the reverse‑engineering
+> evidence) in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
-Each backend gets its own port, state dir, and desktop shortcut so you can run MiMo UltraCode and Composer UltraCode side by side.
+## What you need
 
-## Requirements
+- **Claude Code CLI** with UltraCode access (`npm i -g @anthropic-ai/claude-code`).
+- **Python 3.8+** (standard library only — there is nothing to `pip install`).
+- **At least one backend credential**, e.g. an API key (MiMo / OpenRouter / OpenAI /
+  a local server) and/or a `codex login` for GPT‑5.5. You only set up the ones you have.
 
-- **Windows 11 + WSL2** (Ubuntu tested) — desktop icons launch via `wsl.exe`.
-- **Claude Code CLI** installed (`npm i -g @anthropic-ai/claude-code` or Windows npm path).
-- **Local API shim** with Anthropic `/v1/messages` gateway and UltraCode override support. This repo ships launchers; the gateway lives in [`byok_oai_shim.py`](https://github.com/OnlyTerp/devin-local-proxy) (or your own compatible shim).
-- **Backend credentials** as needed:
-  - **MiMo**: `DEVIN_MIMO_API_KEY` in `~/.config/devin/mimo.env`
-  - **Composer**: Cursor CLI (`cursor-agent`) on PATH inside WSL
+Tested on **Windows 11** (no WSL needed). macOS/Linux/WSL work too via `bin/ultracode`.
 
-## Quick install
-
-```bash
-git clone https://github.com/OnlyTerp/UltraCode-Shim.git ~/UltraCode-Shim
-cd ~/UltraCode-Shim
-./scripts/install.sh
-```
-
-Then from **Windows PowerShell** (creates `.cmd` helpers + Desktop shortcuts):
+## Quick start (Windows)
 
 ```powershell
-cd \\wsl.localhost\Ubuntu\home\$env:USERNAME\UltraCode-Shim
-.\scripts\install-desktop-icons.ps1
+git clone https://github.com/OnlyTerp/UltraCode-Shim.git
+cd UltraCode-Shim
+
+# 1. Sanity-check your machine and config (safe to run anytime)
+python scripts\doctor.py
+
+# 2. Tell it which models you want (see "Configure your models" below)
+#    Edit config\ultracode_slots.json and config\ultracode_models.json,
+#    put any API keys in config\ultracode.env
+
+# 3. Create Desktop icons (one for UltraCode, one for normal Claude Code)
+.\windows\Install-DesktopIcons.ps1
+
+# 4. Double-click "UltraCode (All Models)" — then type /model and pick a backend.
 ```
 
-Or pass `-DesktopPath` if your Desktop is elsewhere (OneDrive sync):
+macOS / Linux / WSL: run `python3 scripts/doctor.py` then `./bin/ultracode`.
 
-```powershell
-.\scripts\install-desktop-icons.ps1 -DesktopPath "$env:USERPROFILE\OneDrive\Desktop"
+## Configure your models
+
+Two small files in `config/` (copied from the `.example` versions on first run):
+
+- **`ultracode_models.json`** — what shows up in the `/model` menu.
+  Every id **must start with `claude` or `anthropic`** (Claude Code filters the rest out).
+- **`ultracode_slots.json`** — where each of those ids actually goes.
+
+Example: add MiMo and an OpenRouter model.
+
+`config/ultracode_models.json`
+```json
+{ "models": [
+  { "id": "claude-mimo",            "display_name": "MiMo v2.5 Pro" },
+  { "id": "claude-openrouter-llama","display_name": "Llama 3.3 70B (OpenRouter)" }
+]}
 ```
 
-## Desktop icons (included presets)
-
-| Shortcut | Backend | Default port | Icon |
-|----------|---------|--------------|------|
-| MiMo v2.5 Pro UltraCode VIDEO | MiMo v2.5 Pro | 18766 | Xiaomi logo |
-| Composer 2.5 Fast UltraCode VIDEO | Cursor Composer 2.5 Fast | 18767 | Cursor icon |
-| Claude MiMo UltraCode | MiMo (interactive, pauses on exit) | 18766 | Windows Terminal |
-
-**VIDEO** variants set the terminal title and session name for screen recordings. Use those for demos; use the plain MiMo shortcut for daily work.
-
-## Smoke test
-
-```bash
-claude-mimo-ultracode --smoke
-claude-composer-ultracode --smoke
+`config/ultracode_slots.json`
+```json
+{
+  "claude-mimo": {
+    "type": "openai_compat",
+    "model": "mimo-v2.5-pro",
+    "upstream": "https://token-plan-sgp.xiaomimimo.com/v1",
+    "auth": "Bearer ${MIMO_API_KEY}"
+  },
+  "claude-openrouter-llama": {
+    "type": "openai_compat",
+    "model": "meta-llama/llama-3.3-70b-instruct",
+    "upstream": "https://openrouter.ai/api/v1",
+    "auth": "Bearer ${OPENROUTER_API_KEY}"
+  }
+}
 ```
 
-Expected: one-line reply (`MIMO_ULTRACODE_OK` / `COMPOSER_ULTRACODE_OK`).
+`config/ultracode.env` (gitignored — keys never get committed)
+```
+MIMO_API_KEY=...
+OPENROUTER_API_KEY=...
+```
 
-## Add a new backend
+Backend types:
 
-1. Add a route in your shim's `MODEL_ROUTES` (e.g. `"my-model": ("provider", "upstream-slug")`).
-2. Copy `bin/claude-composer-ultracode` → `bin/claude-mybackend-ultracode`.
-3. Set `CLAUDE_*_ULTRACODE_BACKEND`, port, and health-check model list.
-4. Add a `-video` wrapper and `.cmd` launcher.
-5. Register it in `scripts/install-desktop-icons.ps1` `$Presets` array.
+| `type`          | Use for                                            | Needs |
+|-----------------|----------------------------------------------------|-------|
+| *(omit)*        | Real Claude or any Anthropic-compatible endpoint   | `auth: "passthrough"` |
+| `openai_compat` | MiMo, OpenRouter, OpenAI, Together, local llama.cpp/Ollama — anything that speaks OpenAI Chat Completions (tools included) | an API key in `ultracode.env` |
+| `codex_oauth`   | GPT‑5.5 via a ChatGPT/Codex login (no API key)     | `codex login` once |
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for shim env vars and gateway details.
+Full walkthrough: [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).
 
-## Configuration
+## Is my normal Claude Code safe?
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `CLAUDE_MIMO_ULTRACODE_PORT` | `18766` | MiMo shim listen port |
-| `CLAUDE_COMPOSER_ULTRACODE_PORT` | `18767` | Composer shim listen port |
-| `CLAUDE_*_ULTRACODE_PROXY_DIR` | `$HOME/devin-local-proxy` | Directory containing `byok_oai_shim.py` |
-| `CLAUDE_CODE_ULTRACODE_BACKEND` | set by launcher | Backend route override inside shim |
-| `DEVIN_MIMO_ENV` | `~/.config/devin/mimo.env` | MiMo API key file |
-| `CURSOR_AGENT_WORKSPACE` | `$PWD` or `$HOME/repos` | Workspace passed to cursor-agent |
+Yes. The UltraCode launcher only sets environment variables **for the launched
+process** and uses a session-scoped `--settings` file. It never edits your global
+Claude config or credentials. The installer also gives you a **"Claude Code (Normal)"**
+icon, so you can always start the plain version. Remove everything with
+`windows\Uninstall.ps1`.
 
-Copy `config/mimo.env.example` → `~/.config/devin/mimo.env` and fill in your key.
+## Telling your AI assistant to set this up
 
-## Why this saves money
+This repo is built so you can hand it to an assistant. Point it at
+[AGENTS.md](AGENTS.md) — that's a step-by-step runbook (install → configure →
+test → troubleshoot) written for an AI to follow.
 
-UltraCode is gated on Opus 4.8. Without a shim, every Workflow pass, every tool round-trip, every deep-research fan-out bills Opus rates. Routing to MiMo or Composer keeps the **harness** (workflows, skills, memory, tool approval) while the **tokens** come from your chosen backend.
+## Docs
 
-Typical setup: Opus for the 5% of tasks that genuinely need it; MiMo or Composer icons for everything else that still wants UltraCode depth.
+| Doc | What |
+|-----|------|
+| [AGENTS.md](AGENTS.md) | Runbook for an AI assistant to install/configure/test |
+| [docs/SETUP.md](docs/SETUP.md) | Human setup guide (Windows + macOS/Linux) |
+| [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | The mechanism + reverse-engineering evidence |
+| [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md) | Add any backend to the `/model` menu |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). This is an unofficial, community project; it is not
+affiliated with Anthropic, OpenAI, or any model provider. You are responsible for
+complying with the terms of whatever accounts you route through it.

@@ -1,6 +1,18 @@
-.env
+# Python
 *.pyc
 __pycache__/
-.local/
+
+# User config (copied from *.example.* on first run) — never commit choices/keys
+/config/ultracode.env
+/config/ultracode_slots.json
+/config/ultracode_models.json
+
+# Secrets / logs / local state
+*.env
+!config/ultracode.example.env
+*.log
+gateway/_test_*.json
+
+# OS
 .DS_Store
 Thumbs.db

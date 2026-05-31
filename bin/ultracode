@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# UltraCode-Shim launcher for macOS / Linux / WSL.
+# Windows users: use windows\Start-UltraCode.ps1 instead.
+#
+# Starts gateway/ultracode_proxy.py, points Claude Code at it with gateway model
+# discovery enabled, seeds the discovery cache, runs `claude`, then stops the
+# proxy on exit. Your normal Claude Code install is untouched (session-scoped
+# --settings + env only).
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GATEWAY="$REPO/gateway"
+CONFIG="$REPO/config"
+PORT="${UC_LISTEN_PORT:-8141}"
+UPSTREAM="${UC_UPSTREAM:-https://api.anthropic.com}"
+BASE_URL="http://127.0.0.1:${PORT}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ultracode-shim"
+SETTINGS="$STATE_DIR/ultracode_settings.json"
+PID_FILE="$STATE_DIR/proxy.pid"
+LOG_FILE="$STATE_DIR/proxy.log"
+
+PY="$(command -v python3 || command -v python || true)"
+[[ -n "$PY" ]] || { echo "Python 3 not found." >&2; exit 1; }
+command -v claude >/dev/null 2>&1 || { echo "claude CLI not found - npm i -g @anthropic-ai/claude-code" >&2; exit 1; }
+
+mkdir -p "$STATE_DIR"
+
+# Config: copy from examples on first run.
+[[ -f "$CONFIG/ultracode_slots.json"  ]] || cp "$CONFIG/ultracode_slots.example.json"  "$CONFIG/ultracode_slots.json"
+[[ -f "$CONFIG/ultracode_models.json" ]] || cp "$CONFIG/ultracode_models.example.json" "$CONFIG/ultracode_models.json"
+if [[ ! -f "$CONFIG/ultracode.env" && -f "$CONFIG/ultracode.example.env" ]]; then
+  cp "$CONFIG/ultracode.example.env" "$CONFIG/ultracode.env"
+  echo "Created config/ultracode.env - add API keys there for openai_compat backends."
+fi
+
+# Load ultracode.env (for ${VAR} expansion in slots).
+if [[ -f "$CONFIG/ultracode.env" ]]; then
+  set -a; # shellcheck disable=SC1091
+  . "$CONFIG/ultracode.env"; set +a
+fi
+
+# Session settings (ultracode + discovery env).
+cat > "$SETTINGS" <<JSON
+{
+  "ultracode": true,
+  "model": "claude-opus-4-8",
+  "env": {
+    "ANTHROPIC_BASE_URL": "$BASE_URL",
+    "CLAUDE_CODE_WORKFLOWS": "1",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  }
+}
+JSON
+
+health_ok() {
+  "$PY" - "$BASE_URL" <<'PY' >/dev/null 2>&1
+import json,sys,urllib.request
+with urllib.request.urlopen(sys.argv[1].rstrip('/')+'/healthz',timeout=2) as r:
+    sys.exit(0 if json.loads(r.read()).get('ok') else 1)
+PY
+}
+
+start_proxy() {
+  if health_ok; then return 0; fi
+  echo "Starting UltraCode proxy on $BASE_URL -> $UPSTREAM ..."
+  UC_LISTEN_PORT="$PORT" UC_UPSTREAM="$UPSTREAM" \
+    UC_SLOT_MAP="$CONFIG/ultracode_slots.json" \
+    UC_MODELS_FILE="$CONFIG/ultracode_models.json" \
+    UC_LOG="$LOG_FILE" \
+    "$PY" "$GATEWAY/ultracode_proxy.py" >>"$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  for _ in $(seq 1 40); do health_ok && return 0; sleep 0.25; done
+  echo "Proxy did not become healthy. Log: $LOG_FILE" >&2
+  tail -20 "$LOG_FILE" >&2 || true
+  exit 1
+}
+
+stop_proxy() {
+  [[ -f "$PID_FILE" ]] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+  rm -f "$PID_FILE"
+}
+trap stop_proxy EXIT
+
+start_proxy
+
+# Seed Claude Code's gateway-models cache so models show on first /model open.
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+"$PY" - "$CONFIG/ultracode_models.json" "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
+import json,os,sys,time
+models_f, cache_f, base = sys.argv[1], sys.argv[2], sys.argv[3]
+os.makedirs(os.path.dirname(cache_f), exist_ok=True)
+models=(json.load(open(models_f)) or {}).get("models",[])
+json.dump({"baseUrl":base,"fetchedAt":int(time.time()*1000),
+           "models":[{"id":m["id"],"display_name":m.get("display_name",m["id"])} for m in models]},
+          open(cache_f,"w"))
+PY
+
+export ANTHROPIC_BASE_URL="$BASE_URL"
+export CLAUDE_CODE_WORKFLOWS=1
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+echo "Launching Claude Code (UltraCode). Open /model to pick a backend."
+claude --settings "$SETTINGS" "$@"
