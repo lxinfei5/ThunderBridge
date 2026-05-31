@@ -1,5 +1,10 @@
 # UltraCode-Shim
 
+[![CI](https://github.com/OnlyTerp/UltraCode-Shim/actions/workflows/ci.yml/badge.svg)](https://github.com/OnlyTerp/UltraCode-Shim/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![deps: stdlib only](https://img.shields.io/badge/deps-stdlib%20only-success)
+
 Use Claude Code's **UltraCode** mode (xhigh effort + the Workflow/deep-reasoning
 harness) with **any model you already pay for** — pick it live from the `/model`
 menu.
@@ -25,6 +30,21 @@ isn't HTTP-based — see [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
 > there is no secret model. The proxy adds that envelope to every request, so any
 > backend gets the UltraCode treatment. Full breakdown (with the reverse‑engineering
 > evidence) in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+
+## Demo
+
+There's a ready-to-run scenario in [`examples/demo/`](examples/demo/) — a buggy
+little Game of Life. Launch UltraCode there, pick any model, enable auto mode,
+and paste [the prompt](examples/demo/PROMPT.md): it fixes the bug, adds an
+animated color renderer + starting patterns, and runs its own self-test, ending
+on a glider crawling across the screen.
+
+<!-- Recording goes here. Drop a clip at assets/demo/demo.gif and uncomment: -->
+<!-- ![UltraCode-Shim demo](assets/demo/demo.gif) -->
+
+Verified live against real backends: **GPT‑5.5** (Codex login) and **Cursor
+Composer**, plus an offline self-test that runs in CI on Linux/Windows ×
+Python 3.8/3.12.
 
 ## What you need
 

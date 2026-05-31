@@ -118,7 +118,16 @@ needed. Optional env knobs: `UC_CODEX_EFFORT`, `UC_CODEX_SERVICE_TIER`,
 
 Needs the `cursor-agent` CLI and `cursor-agent login`. It's an autonomous agent,
 not a plain endpoint, so we run it in read-only "ask" mode and bridge tool calls
-as text markers — great for reasoning/answers, best-effort for tool-calling.
+as text markers — great for reasoning/answers, best-effort for tool-calling (the
+model may not match your tool's exact argument names).
+
+Live-tested: plain answers and the tool bridge both work (~4–7s per turn). Knobs:
+`CURSOR_AGENT_TIMEOUT` (default 240s) and `CURSOR_AGENT_WORKSPACE`.
+
+> **Behind an intercepting HTTP(S) proxy?** `cursor-agent` talks to Cursor's
+> cloud itself; a TLS-intercepting proxy can make it hang/time out. Set
+> `CURSOR_AGENT_NO_PROXY=1` to strip `HTTP(S)_PROXY`/`ALL_PROXY` from the
+> cursor-agent child process.
 
 ## What ships in the example
 

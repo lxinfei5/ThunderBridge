@@ -255,7 +255,8 @@ def stream_events(messages, tools=None, tool_choice=None, model="gpt-5.5",
         yield {"type": "error", "message": "Codex API error: %s" % e, "status": 502}
         return
 
-    pending = {}      # call_id -> {"name","args"}
+    pending = {}      # canonical id -> {"name","args"}
+    alias = {}        # any id (item id "fc_..." or call id "call_...") -> canonical
     buf = b""
     in_tok = 0
     out_tok = 0
@@ -286,24 +287,36 @@ def stream_events(messages, tools=None, tool_choice=None, model="gpt-5.5",
                 elif et == "response.output_item.added":
                     item = obj.get("item") or {}
                     if item.get("type") == "function_call":
-                        cid = item.get("call_id") or item.get("id") or ""
-                        pending[cid] = {"name": item.get("name") or "",
-                                        "args": item.get("arguments") or ""}
+                        call_id = item.get("call_id") or ""
+                        item_id = item.get("id") or ""
+                        canon = call_id or item_id
+                        # The 'added'/'done' events use call_id; the argument
+                        # deltas use item_id. Alias both to one canonical key so
+                        # we don't emit the same call twice.
+                        if call_id:
+                            alias[call_id] = canon
+                        if item_id:
+                            alias[item_id] = canon
+                        pending[canon] = {"name": item.get("name") or "",
+                                          "args": item.get("arguments") or ""}
                 elif et == "response.function_call_arguments.delta":
-                    cid = obj.get("call_id") or obj.get("item_id") or ""
-                    slot = pending.setdefault(cid, {"name": "", "args": ""})
+                    raw = obj.get("call_id") or obj.get("item_id") or ""
+                    canon = alias.get(raw, raw)
+                    slot = pending.setdefault(canon, {"name": "", "args": ""})
                     if isinstance(obj.get("delta"), str):
                         slot["args"] += obj["delta"]
                 elif et == "response.output_item.done":
                     item = obj.get("item") or {}
                     if item.get("type") == "function_call":
-                        cid = item.get("call_id") or item.get("id") or ""
-                        slot = pending.get(cid, {"name": "", "args": ""})
+                        call_id = item.get("call_id") or ""
+                        item_id = item.get("id") or ""
+                        canon = alias.get(call_id) or alias.get(item_id) or call_id or item_id
+                        slot = pending.get(canon, {"name": "", "args": ""})
                         name = item.get("name") or slot.get("name") or ""
                         args = item.get("arguments") or slot.get("args") or "{}"
-                        yield {"type": "tool_call", "id": cid or None,
+                        yield {"type": "tool_call", "id": canon or None,
                                "name": name, "arguments": args}
-                        pending.pop(cid, None)
+                        pending.pop(canon, None)
                 elif et in ("response.completed", "response.done"):
                     usage = ((obj.get("response") or {}).get("usage")) or {}
                     in_tok = usage.get("input_tokens", in_tok) or in_tok
@@ -317,11 +330,13 @@ def stream_events(messages, tools=None, tool_choice=None, model="gpt-5.5",
         yield {"type": "error", "message": "Codex stream relay ended: %s" % e, "status": 502}
         return
 
-    # Flush any tool calls that only got an added/delta but no done.
+    # Flush any tool calls that got an added/delta but never a 'done'. Require a
+    # name: a nameless leftover is a phantom (e.g. a stray delta whose id never
+    # matched an 'added'), and emitting it would be a duplicate, unusable call.
     for cid, slot in pending.items():
-        if slot.get("name") or slot.get("args"):
+        if slot.get("name"):
             yield {"type": "tool_call", "id": cid or None,
-                   "name": slot.get("name") or "", "arguments": slot.get("args") or "{}"}
+                   "name": slot["name"], "arguments": slot.get("args") or "{}"}
     if in_tok or out_tok:
         yield {"type": "usage", "input_tokens": in_tok, "output_tokens": out_tok}
 

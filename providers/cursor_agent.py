@@ -26,6 +26,10 @@ ENV KNOBS
                           then ~/.local/bin/cursor-agent)
   CURSOR_AGENT_WORKSPACE  workspace dir (default: cwd)
   CURSOR_AGENT_TIMEOUT    seconds before giving up (default 240)
+  CURSOR_AGENT_NO_PROXY   if set (1/true/yes), strip HTTP(S)_PROXY / ALL_PROXY
+                          from the cursor-agent child env. cursor-agent manages
+                          its own networking to Cursor's cloud; an intercepting
+                          TLS proxy in your environment can make it hang/time out.
 """
 
 import json
@@ -149,6 +153,10 @@ def stream_events(messages, tools=None, model="composer-2.5", workspace=None):
            "--model", model, "--mode", "ask", "--trust",
            "--workspace", ws, prompt]
     env = dict(os.environ)
+    if os.environ.get("CURSOR_AGENT_NO_PROXY", "").lower() in ("1", "true", "yes"):
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                    "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(var, None)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 env=env, text=False)
@@ -161,8 +169,10 @@ def stream_events(messages, tools=None, model="composer-2.5", workspace=None):
     except subprocess.TimeoutExpired:
         proc.kill()
         yield {"type": "error",
-               "message": "cursor-agent timed out after %ds (it may be unable to reach "
-                          "Cursor's servers from here)." % timeout, "status": 504}
+               "message": "cursor-agent timed out after %ds. It may be unable to reach "
+                          "Cursor's servers from here \u2014 if you're behind an intercepting "
+                          "HTTP(S) proxy, set CURSOR_AGENT_NO_PROXY=1." % timeout,
+               "status": 504}
         return
 
     text_chunks = []

@@ -44,6 +44,15 @@ tools). Set `"type": "openai_compat"` for that route — the proxy then translat
 Anthropic `tool_use`/`tool_result` ⇄ OpenAI `tool_calls` both ways. Real Claude
 (passthrough) already handles tools natively.
 
+### Composer (`cursor_agent`) hangs or times out
+
+`cursor-agent` reaches Cursor's cloud on its own. If you're behind a
+TLS-intercepting HTTP(S) proxy, it can hang until it times out. Set
+`CURSOR_AGENT_NO_PROXY=1` (strips `HTTP(S)_PROXY`/`ALL_PROXY` for the cursor-agent
+child) and confirm `cursor-agent login` succeeded. Composer is experimental:
+plain answers and a best-effort tool bridge work, but it may not match your tool's
+exact argument names.
+
 ### "Proxy did not become healthy"
 
 - Another process is on the port. Pick another: set `proxy.listen_port` in
