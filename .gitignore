@@ -1,6 +1,18 @@
-.env
-*.pyc
+# ultracode-unlock
+# Your real config (contains API keys) — never commit it.
+config.json
+
+# Local proxy logs
+*.log
+proxy.log
+
+# Python
 __pycache__/
-.local/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS cruft
 .DS_Store
 Thumbs.db
+*.swp

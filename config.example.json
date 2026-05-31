@@ -1,0 +1,35 @@
+{
+  "_README": "Copy this file to config.json and edit it. This is the ONLY file you edit. See README.md and recipes/ for provider-specific values. Comments (keys starting with _) are ignored by the proxy.",
+
+  "_proxy": "Optional proxy settings. Defaults are fine for almost everyone.",
+  "proxy": {
+    "_listen_port": "Local port the proxy listens on. Claude Code is pointed here automatically by start.ps1/start.sh. Change only if 8141 is taken.",
+    "listen_port": 8141,
+    "_anthropic_upstream": "Where the real Anthropic API lives. Don't change this unless you know why.",
+    "anthropic_upstream": "https://api.anthropic.com",
+    "_max_tokens_floor": "Ultracode raises every request's max_tokens to at least this. 64000 matches real ultracode.",
+    "max_tokens_floor": 64000
+  },
+
+  "_models": "What shows up in Claude Code's /model picker. id = internal id (MUST start with 'claude' or 'anthropic' or it gets dropped). display_name = the label you actually see — make it whatever you want.",
+  "models": [
+    { "id": "claude-gpt-5.5",  "display_name": "GPT-5.5 (my OpenAI plan)" },
+    { "id": "claude-mimo-pro", "display_name": "MIMO V2.5 PRO" }
+  ],
+
+  "_routes": "Where each model id above actually goes. The key MUST match an id in 'models'. Fields: type ('openai_compat' for any OpenAI-chat backend, or 'anthropic' to pass straight through to Anthropic), upstream (backend base URL, no trailing /v1), model (the real model name AT that backend), auth ('passthrough' to reuse Claude Code's own OAuth, or a literal header like 'Bearer sk-...' or 'x-api-key: ...').",
+  "routes": {
+    "claude-gpt-5.5": {
+      "type": "openai_compat",
+      "upstream": "https://api.openai.com",
+      "model": "gpt-5.5",
+      "auth": "Bearer sk-REPLACE_ME"
+    },
+    "claude-mimo-pro": {
+      "type": "openai_compat",
+      "upstream": "https://api.mimo.example",
+      "model": "mimo-2.5-pro",
+      "auth": "Bearer mimo-REPLACE_ME"
+    }
+  }
+}
