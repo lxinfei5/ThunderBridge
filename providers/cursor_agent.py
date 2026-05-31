@@ -133,6 +133,11 @@ def _parse_stream(line_iter):
 
 
 def stream_events(messages, tools=None, model="composer-2.5", workspace=None):
+    # Cursor removed Composer 2: any legacy `composer-2*` id that isn't
+    # `composer-2.5*` is no longer a valid cursor-agent model (it exits
+    # "Cannot use this model" and yields nothing usable). Coerce to live Composer 2.5.
+    if isinstance(model, str) and model.startswith("composer-2") and not model.startswith("composer-2.5"):
+        model = "composer-2.5"
     binp = _bin()
     if not binp or not os.path.exists(binp):
         yield {"type": "error",
