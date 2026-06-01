@@ -64,7 +64,8 @@ Resolve any `[FAIL]` lines (each prints the fix), until it exits cleanly.
 
 Creates two Desktop shortcuts:
 
-- **UltraCode (All Models)** — starts the proxy and Claude Code with discovery on.
+- **UltraCode (All Models)** — starts the proxy, opens the two-column
+  orchestrator/worker selector, then launches Claude Code with discovery on.
 - **Claude Code (Normal)** — plain `claude`, your usual install, untouched.
 
 To target a non-default Desktop:
@@ -83,8 +84,13 @@ If PowerShell blocks the script, run it once as:
 
 ## 6. Use it
 
-Double-click **UltraCode (All Models)** (or run the launcher). When Claude Code
-opens, type `/model` and pick a backend. Everything runs with full UltraCode.
+Double-click **UltraCode (All Models)** (or run the launcher). First, the
+selector opens: pick an orchestrator on the left and a worker on the right
+(`Same as orchestrator` means one model runs everything). Claude Code then opens
+with full UltraCode. You can still type `/model` later to change either tier.
+
+Set `UC_SELECTOR=0` before launching if you want to skip the selector and choose
+from `/model` only.
 
 ## Uninstall
 

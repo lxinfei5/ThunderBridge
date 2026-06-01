@@ -82,21 +82,52 @@ trap stop_proxy EXIT
 
 start_proxy
 
-# Seed Claude Code's gateway-models cache so models show on first /model open.
+# Seed Claude Code's gateway-models cache from the live proxy so synthesized
+# Worker -> entries show on first /model open too.
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-"$PY" - "$CONFIG" "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
-import json,os,sys,time
-cfg_f, cache_f, base = sys.argv[1], sys.argv[2], sys.argv[3]
+"$PY" - "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
+import json,os,sys,time,urllib.request
+cache_f, base = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.dirname(cache_f), exist_ok=True)
-models=(json.load(open(cfg_f)) or {}).get("models",[]) or []
-json.dump({"baseUrl":base,"fetchedAt":int(time.time()*1000),
-           "models":[{"id":m["id"],"display_name":m.get("display_name",m["id"])}
-                     for m in models if isinstance(m,dict) and m.get("id")]},
-          open(cache_f,"w"))
+models=[]
+with urllib.request.urlopen(base.rstrip('/')+'/healthz',timeout=2) as r:
+    health=json.loads(r.read().decode('utf-8'))
+for m in health.get('custom_models') or []:
+    if isinstance(m,dict) and m.get('id'):
+        models.append({'id':m['id'],'display_name':m.get('display_name',m['id'])})
+json.dump({'baseUrl':base,'fetchedAt':int(time.time()*1000),'models':models}, open(cache_f,'w'))
 PY
 
 export ANTHROPIC_BASE_URL="$BASE_URL"
 export CLAUDE_CODE_WORKFLOWS=1
 export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
-echo "Launching Claude Code (UltraCode). Open /model to pick a backend."
-claude --settings "$SETTINGS" "$@"
+
+SELECTED_MODEL=""
+SELECTOR="$REPO/scripts/ultracode_selector.py"
+if [[ "${UC_SELECTOR:-1}" != "0" && -f "$SELECTOR" ]]; then
+  set +e
+  SELECTED_MODEL="$(UC_PROXY="$BASE_URL" "$PY" "$SELECTOR")"
+  SEL_RC=$?
+  set -e
+  if [[ $SEL_RC -eq 0 && -n "$SELECTED_MODEL" ]]; then
+    echo "Selected orchestrator: $SELECTED_MODEL"
+  elif [[ $SEL_RC -eq 1 ]]; then
+    echo "Selector cancelled; launching with default model."
+    SELECTED_MODEL=""
+  else
+    echo "Selector unavailable; launching with default model."
+    SELECTED_MODEL=""
+  fi
+fi
+
+HAS_MODEL_ARG=0
+for arg in "$@"; do
+  if [[ "$arg" == "--model" || "$arg" == --model=* ]]; then HAS_MODEL_ARG=1; fi
+done
+
+echo "Launching Claude Code (UltraCode). Use /model anytime to change backend."
+if [[ -n "$SELECTED_MODEL" && $HAS_MODEL_ARG -eq 0 ]]; then
+  claude --settings "$SETTINGS" --model "$SELECTED_MODEL" "$@"
+else
+  claude --settings "$SETTINGS" "$@"
+fi

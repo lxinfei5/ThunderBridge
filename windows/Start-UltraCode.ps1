@@ -7,8 +7,8 @@
 .DESCRIPTION
   Starts proxy.py on a loopback port, points Claude Code at it via
   ANTHROPIC_BASE_URL, enables gateway model discovery, seeds the discovery cache
-  so your models show on first open, then runs `claude`. When Claude Code exits,
-  the proxy is stopped.
+  so your models show on first open, runs the two-column model selector, then
+  runs `claude`. When Claude Code exits, the proxy is stopped.
 
   Your normal Claude Code install is untouched: this only sets environment for
   THIS process and uses a session-scoped --settings file.
@@ -136,13 +136,15 @@ $CfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Pat
 $GwCache = Join-Path (Join-Path $CfgDir "cache") "gateway-models.json"
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path $GwCache) | Out-Null
+    $health = Invoke-RestMethod -Uri "$BaseUrl/healthz" -TimeoutSec 2
+    $models = @($health.custom_models | ForEach-Object { [ordered]@{ id = $_.id; display_name = $_.display_name } })
     $seed = [ordered]@{
         baseUrl   = $BaseUrl
         fetchedAt = [int64]([datetimeoffset](Get-Date)).ToUnixTimeMilliseconds()
-        models    = @($Cfg.models | ForEach-Object { [ordered]@{ id = $_.id; display_name = $_.display_name } })
+        models    = $models
     }
     $seed | ConvertTo-Json -Depth 5 | Set-Content -Path $GwCache -Encoding utf8
-    Write-Host "Seeded gateway-models cache ($(@($Cfg.models).Count) models)."
+    Write-Host "Seeded gateway-models cache ($(@($models).Count) models)."
 } catch {
     Write-Host "WARN: could not seed gateway-models cache: $_" -ForegroundColor Yellow
 }
@@ -160,9 +162,43 @@ if ($ProxyOnly) {
 $env:ANTHROPIC_BASE_URL = $BaseUrl
 $env:CLAUDE_CODE_WORKFLOWS = "1"
 $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
-Write-Host "Launching Claude Code (UltraCode). Open /model to pick a backend." -ForegroundColor Green
+
+$SelectedModel = ""
+$Selector = Join-Path $RepoRoot "scripts\ultracode_selector.py"
+if (($env:UC_SELECTOR -ne "0") -and (Test-Path $Selector)) {
+    try {
+        $env:UC_PROXY = $BaseUrl
+        $selArgs = @()
+        if ($PyCmd.Count -gt 1) { $selArgs += $PyCmd[1..($PyCmd.Count-1)] }
+        $selArgs += $Selector
+        $SelectedModel = (& $PyCmd[0] @selArgs | Select-Object -Last 1)
+        if ($LASTEXITCODE -eq 0 -and $SelectedModel) {
+            Write-Host "Selected orchestrator: $SelectedModel" -ForegroundColor Green
+        } elseif ($LASTEXITCODE -eq 1) {
+            Write-Host "Selector cancelled; launching with default model." -ForegroundColor Yellow
+            $SelectedModel = ""
+        } else {
+            Write-Host "Selector unavailable; launching with default model." -ForegroundColor Yellow
+            $SelectedModel = ""
+        }
+    } catch {
+        Write-Host "Selector unavailable; launching with default model: $_" -ForegroundColor Yellow
+        $SelectedModel = ""
+    }
+}
+
+$HasModelArg = $false
+foreach ($a in $args) {
+    if ($a -eq "--model" -or $a.StartsWith("--model=")) { $HasModelArg = $true }
+}
+
+Write-Host "Launching Claude Code (UltraCode). Use /model anytime to change backend." -ForegroundColor Green
 try {
-    & $Claude.Source --settings "$Settings" @args
+    if ($SelectedModel -and -not $HasModelArg) {
+        & $Claude.Source --settings "$Settings" --model "$SelectedModel" @args
+    } else {
+        & $Claude.Source --settings "$Settings" @args
+    }
 } finally {
     Write-Host "Claude exited. Stopping proxy (pid $($proc.Id))."
     Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue

@@ -25,6 +25,19 @@ The proxy log is at:
 - **You're not on an OAuth login.** Gateway discovery only triggers for
   first-party (OAuth) logins, not raw `ANTHROPIC_API_KEY` keys.
 
+### The pre-launch selector doesn't open / says it cannot reach `/uc/select`
+
+- **Proxy not healthy yet or wrong port.** The launcher starts the proxy before
+  the selector. If the selector says it cannot reach `/uc/select`, check the
+  proxy log path above and confirm `config.json`'s `proxy.listen_port` matches
+  any `UC_LISTEN_PORT` override.
+- **Non-interactive terminal.** The selector draws on the controlling terminal
+  (`/dev/tty` or `CONOUT$`) while stdout is reserved for the selected model id.
+  If your terminal runner has no TTY, set `UC_SELECTOR=0` and choose models from
+  `/model` after Claude opens.
+- **Need to bypass it.** Set `UC_SELECTOR=0` before launching. Orchestrator/worker
+  routing still works through `/model` (`Worker → X` entries set the worker tier).
+
 ### The model is listed but the answer is an error / empty
 
 - Check the proxy log (path above) for the upstream status line.

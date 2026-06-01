@@ -88,21 +88,30 @@ request by tier:
 
 `main()` advertises a synthesized **`Worker → <name>`** entry (id
 `claude-worker-<x>`, routed exactly like its base model) for every model in your
-config, so the picker lists both an orchestrator and a worker choice for each
-backend. Selection rules:
+config. That gives you two ways to set the tiers:
 
-- A **plain pick** (e.g. `claude-minimax-m3`) sets **both** tiers → that model runs
-  everything.
-- A **`Worker → X` pick** sets only the worker tier → orchestrator stays whatever
-  you picked (or falls back to the worker).
+- The launcher runs `scripts/ultracode_selector.py` before Claude Code starts. It
+  reads `GET /uc/select`, lets you choose left-column orchestrator + right-column
+  worker, then posts the choice back to `POST /uc/select`. The selector prints
+  the orchestrator id on stdout so the launcher can pass it to `claude --model`.
+- Inside Claude Code, `/model` still lists both plain model entries and
+  `Worker → X` entries, so you can change either tier mid-session.
+
+Selection rules:
+
+- A **plain pick** (e.g. `claude-minimax-m3`) or selector worker value
+  **`Same as orchestrator`** sets both tiers → that model runs everything.
+- A **`Worker → X` pick** (or selector worker model) sets only the worker tier →
+  orchestrator stays whatever you picked.
 - **Stock ids** (`claude-opus-4-8`, sonnet, haiku — the workflow's hardcoded
   background traffic) never change the selection; they're **remapped** to it. That
   is what makes "use MiniMax" mean MiniMax for the whole workflow.
 
 The selection lives in the proxy process (one `claude` session), guarded by a
-lock, and resets when the proxy restarts. Disable the whole feature with
+lock, and resets when the proxy restarts. Disable tier routing with
 `UC_ORCH_WORKER=0` (then a pick routes 1:1 and stock ids pass through untouched).
-Set `UC_TIER_LOG=1` to log the per-request tier + remap.
+Disable only the pre-launch selector with `UC_SELECTOR=0`. Set `UC_TIER_LOG=1` to
+log the per-request tier + remap.
 
 **Parallelism.** The proxy is a `ThreadingHTTPServer`, so the N workers a workflow
 fans out are handled concurrently — there's no artificial serialization in the
@@ -173,6 +182,7 @@ without leaking the chain-of-thought into the reply.
 | `UC_EMPTY_RETRY_BACKOFF` | `0.75` | Seconds to wait between those retries. |
 | `UC_CODEX_STREAM_IDLE_TIMEOUT` | `150` | Per-read idle cap (s) on the codex stream so a stall retries instead of hanging. |
 | `UC_ORCH_WORKER` | `1` | Orchestrator+worker two-tier routing (§5). Set `0` to route each pick 1:1. |
+| `UC_SELECTOR` | `1` | Pre-launch two-column selector. Set `0` to skip it and choose from `/model` only. |
 | `UC_TIER_LOG` | `0` | Log the per-request tier (`heavy`/`fast`) + any model remap. |
 
 These are covered by the offline self-test (`test_proxy.py`) so they don't

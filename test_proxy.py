@@ -279,6 +279,23 @@ def main():
         assert up._select_target("claude-opus-4-8", "fast") == "claude-mimo"
         print("[ok] orchestrator+worker: picker entries, tier routing, stock-traffic capture")
 
+        # /uc/select: the two-column pre-launch selector pre-sets both tiers
+        # without needing a /model pick. _set_selection drives the same routing.
+        _reset_sel()
+        active = up._set_selection(orch="claude-minimax", worker=None)
+        assert active["orch"] == "claude-minimax" and active["worker"] == "claude-minimax"
+        _reset_sel()
+        active = up._set_selection(orch="claude-mock", worker="claude-mimo")
+        assert active["orch"] == "claude-mock" and active["worker"] == "claude-mimo"
+        assert up._select_target("claude-opus-4-8", "heavy") == "claude-mock"
+        assert up._select_target("claude-opus-4-8", "fast") == "claude-mimo"
+        # live endpoint round-trip through the running proxy
+        sel = json.loads(_get("/uc/select"))
+        assert sel["ok"] and "orchestrators" in sel and "workers" in sel, sel
+        r = _post("/uc/select", {"orchestrator": "claude-mock", "worker": "claude-mock"})
+        assert json.loads(r)["active"]["orch"] == "claude-mock", r
+        print("[ok] /uc/select endpoint: GET lists models, POST pre-sets tiers")
+
         print("\nALL TESTS PASSED")
         return 0
     finally:

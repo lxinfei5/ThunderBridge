@@ -1,7 +1,8 @@
 # Runbook for AI assistants
 
 You are helping a user set up **UltraCode-Shim**: it lets Claude Code's UltraCode
-mode run on any model the user already pays for, chosen from the `/model` menu.
+mode run on any model the user already pays for, chosen from the pre-launch
+orchestrator/worker selector or from the `/model` menu.
 
 Follow these phases in order. Do not skip the doctor. Everything here is pure
 Python standard library — **do not** `pip install` anything. Prefer the commands
@@ -9,12 +10,13 @@ exactly as written; they are cross-platform-aware.
 
 ## Phase 0 — Understand the goal (read once)
 
-The end state: the user double-clicks **"UltraCode (All Models)"**, Claude Code
-opens, they type `/model`, and they can pick any backend they configured. The
-mechanism (no magic): a tiny loopback proxy (`proxy.py`) sits at
-`ANTHROPIC_BASE_URL`, advertises the user's models on `GET /v1/models` (so they
-appear in the picker), adds the UltraCode envelope to every request, and routes
-each pick to its real backend. See `docs/HOW_IT_WORKS.md`.
+The end state: the user double-clicks **"UltraCode (All Models)"**, picks an
+orchestrator + worker in the selector, and Claude Code opens already pointed at
+that choice. They can still type `/model` later and pick any backend they
+configured. The mechanism (no magic): a tiny loopback proxy (`proxy.py`) sits at
+`ANTHROPIC_BASE_URL`, advertises the user's models plus synthesized `Worker → X`
+entries on `GET /v1/models`, adds the UltraCode envelope to every request, and
+routes each pick to its real backend. See `docs/HOW_IT_WORKS.md`.
 
 ## Phase 1 — Prerequisites
 
@@ -88,13 +90,19 @@ every `${VAR}` referenced by a route is present (or the key is inline), and
   and "Claude Code (Normal)"). Or launch directly: `./windows/Start-UltraCode.ps1`.
 - **macOS/Linux/WSL:** `./bin/ultracode`.
 
+The launcher starts the proxy, seeds Claude Code's gateway-models cache from the
+live proxy (including synthesized `Worker → X` entries), opens the two-column
+selector, then passes the selected orchestrator as `claude --model ...`. Set
+`UC_SELECTOR=0` to skip the selector and choose from `/model` only.
+
 ## Phase 6 — Verify end to end
 
-1. Launch UltraCode. In Claude Code, type `/model` and confirm the user's custom
-   models appear (they may show on the first open or a moment later — the proxy
-   serves them on `GET /v1/models`).
-2. Pick one and send a trivial prompt ("say OK"). Confirm a reply.
-3. Pick one that needs tools and ask something requiring a tool call; confirm tools
+1. Launch UltraCode. Confirm the selector appears and can pick an orchestrator +
+   worker (`Same as orchestrator` means one model runs everything).
+2. In Claude Code, type `/model` and confirm the user's custom models and
+   `Worker → X` entries appear (the proxy serves them on `GET /v1/models`).
+3. Send a trivial prompt ("say OK"). Confirm a reply uses the selected model.
+4. Pick one that needs tools and ask something requiring a tool call; confirm tools
    fire (the proxy translates tool calls both ways).
 
 If a model doesn't appear or errors, go to `docs/TROUBLESHOOTING.md` and match the

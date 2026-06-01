@@ -49,14 +49,16 @@ quietly issues most of its background/sub-agent traffic as the *stock* model
 that do the bulk of a workflow don't follow your selection (and can bill a model
 you didn't choose).
 
-This proxy turns that single slot into **two**. For every model you configure it
-auto-adds a `Worker → <model>` entry, so `/model` lets you choose an
-**orchestrator** (the main interactive loop) *and* a **worker** (every Workflow/
-Task sub-agent) independently:
+This proxy turns that single slot into **two**. The launcher opens a two-column
+selector before Claude Code starts: choose an **orchestrator** (the main
+interactive loop) on the left and a **worker** (every Workflow/Task sub-agent) on
+the right. The same choices are also available later in `/model`: for every model
+you configure, the proxy auto-adds a `Worker → <model>` entry.
 
-- Pick **one** model (e.g. `MiniMax-M3`) → it runs **everything**, orchestrator
-  *and* every parallel worker. One pick, your model end-to-end.
-- Pick an orchestrator **plus** a `Worker → X` → the smart model plans while a
+- Pick **one** model (or choose `Same as orchestrator` in the selector) → it runs
+  **everything**, orchestrator *and* every parallel worker. One pick, your model
+  end-to-end.
+- Pick an orchestrator **plus** a worker model → the smart model plans while a
   cheaper/faster model fans out the parallel work.
 
 How it routes: the proxy classifies each request by a structural signal (the main
@@ -144,12 +146,15 @@ copy config.example.json config.json
 # 3. Create Desktop icons (one for UltraCode, one for normal Claude Code)
 .\windows\Install-DesktopIcons.ps1
 
-# 4. Double-click "UltraCode (All Models)" — then type /model and pick a backend.
+# 4. Double-click "UltraCode (All Models)" — pick orchestrator + worker in the selector.
+#    You can still type /model later to change either tier.
 ```
 
 ### macOS / Linux / WSL
 
-Run `python3 scripts/doctor.py` then `./bin/ultracode`.
+Run `python3 scripts/doctor.py` then `./bin/ultracode`. The launcher starts the
+proxy, opens the two-column orchestrator/worker selector, then launches Claude
+Code. Set `UC_SELECTOR=0` to skip the selector and use `/model` only.
 (The launchers copy `config.example.json` → `config.json` for you on first run if
 you skip step 2.)
 

@@ -301,6 +301,21 @@ def _request_tier(body: dict) -> str:
     return "fast"
 
 
+def _set_selection(orch=None, worker=None):
+    """Directly pre-set the sticky orchestrator/worker selection (used by the
+    two-column pre-launch selector via POST /uc/select). Either may be None to
+    leave that tier unchanged. Returns the resolved active selection dict."""
+    with _SEL_LOCK:
+        if orch is not None:
+            _ACTIVE["orch"] = orch or None
+        if worker is not None:
+            _ACTIVE["worker"] = worker or None
+            _ACTIVE["worker_explicit"] = bool(worker)
+        if orch and worker is None and not _ACTIVE["worker_explicit"]:
+            _ACTIVE["worker"] = orch
+        return dict(_ACTIVE)
+
+
 def _select_target(mid, tier: str):
     """Update the sticky orchestrator/worker selection from a deliberate pick,
     then return the picker id this request should route to (by tier). Returns
@@ -911,12 +926,49 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self._maybe_health():
             return
+        if self.path.split("?")[0] == "/uc/select":
+            self._handle_uc_select_get()
+            return
         if self.path.split("?")[0].endswith("/v1/models") and self._handle_models():
             return
         self._proxy("GET")
 
     def do_POST(self):
+        if self.path.split("?")[0] == "/uc/select":
+            self._handle_uc_select_post()
+            return
         self._proxy("POST")
+
+    # ---- /uc/select: pre-set orchestrator+worker (used by the launcher TUI) ----
+    def _handle_uc_select_get(self):
+        with _SEL_LOCK:
+            active = dict(_ACTIVE)
+        self._raw(200, "application/json", json.dumps({
+            "ok": True,
+            "active": active,
+            "orchestrators": [{"id": m["id"], "display_name": m["display_name"]}
+                              for m in UC_MODELS if m["id"] in _ORCH_PICK_IDS],
+            "workers": [{"id": wid, "base": base,
+                         "display_name": next((m["display_name"] for m in UC_MODELS
+                                               if m["id"] == wid), wid)}
+                        for wid, base in _WORKER_MAP.items()],
+        }).encode("utf-8"))
+
+    def _handle_uc_select_post(self):
+        body = self._read_body()
+        try:
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception as e:
+            self._raw(400, "application/json",
+                      json.dumps({"ok": False, "error": "bad json: %s" % e}).encode("utf-8"))
+            return
+        worker = data.get("worker")
+        if worker in _WORKER_MAP:      # accept either a worker picker id or its base
+            worker = _WORKER_MAP[worker]
+        active = _set_selection(orch=data.get("orchestrator"), worker=worker)
+        log("uc/select set orchestrator=%s worker=%s" % (active.get("orch"), active.get("worker")))
+        self._raw(200, "application/json",
+                  json.dumps({"ok": True, "active": active}).encode("utf-8"))
 
     def do_PUT(self):
         self._proxy("PUT")
