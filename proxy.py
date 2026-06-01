@@ -256,6 +256,102 @@ UC_MODELS = []     # populated in main()
 
 
 # --------------------------------------------------------------------------
+# Orchestrator + Worker (two-model dynamic workflows)
+# --------------------------------------------------------------------------
+# Claude Code's /model picker is single-slot, and its dynamic-workflow machinery
+# issues most of its background traffic as the stock model (claude-opus-4-8 etc.)
+# regardless of your pick -- so the sub-agents/leaves that do the bulk of a
+# workflow's work don't follow your selection. This proxy fixes that by holding a
+# sticky two-tier selection and routing EVERY request by tier:
+#   heavy (orchestrator: the main interactive loop -- carries an interactive-only
+#          tool like AskUserQuestion/ExitPlanMode) -> the orchestrator model
+#   fast  (worker: every Workflow/Task sub-agent + background call)
+#          -> the worker model
+# main() auto-adds a "Worker -> X" picker entry (id claude-worker-X) for each of
+# your models, so you can pick an orchestrator AND a worker from /model. A plain
+# pick sets BOTH tiers (one model everywhere); a "Worker -> X" pick sets only the
+# worker tier. Stock opus/sonnet/haiku ids never change the selection -- they are
+# remapped to it, so background workflow traffic follows your pick instead of
+# silently billing the stock model. Disable with UC_ORCH_WORKER=0.
+ORCH_WORKER = os.environ.get("UC_ORCH_WORKER", "1") == "1"
+WORKER_ID_PREFIX = "claude-worker-"
+TIER_LOG = os.environ.get("UC_TIER_LOG", "0") == "1"
+# Tools the harness hands ONLY to the main interactive loop (never to Workflow/
+# Task sub-agents). Their presence marks the orchestrator ("heavy") -- a far more
+# reliable structural signal than scraping the system prompt.
+_INTERACTIVE_ONLY_TOOLS = frozenset({
+    "AskUserQuestion", "ExitPlanMode", "EnterPlanMode",
+})
+_SEL_LOCK = threading.Lock()
+_ACTIVE = {"orch": None, "worker": None, "worker_explicit": False}
+_ORCH_PICK_IDS = set()   # base orchestrator picker ids (filled in main())
+_WORKER_MAP = {}         # claude-worker-<x> -> claude-<x>  (filled in main())
+
+
+def _request_tier(body: dict) -> str:
+    """"heavy" for the main interactive loop (carries an interactive-only tool),
+    "fast" for every Workflow/Task sub-agent + background call."""
+    if not ORCH_WORKER:
+        return "heavy"
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        for t in tools:
+            if isinstance(t, dict) and t.get("name") in _INTERACTIVE_ONLY_TOOLS:
+                return "heavy"
+    return "fast"
+
+
+def _select_target(mid, tier: str):
+    """Update the sticky orchestrator/worker selection from a deliberate pick,
+    then return the picker id this request should route to (by tier). Returns
+    ``mid`` unchanged when the feature is off or no selection is active yet, so
+    fresh sessions behave exactly as before."""
+    if not ORCH_WORKER:
+        return mid
+    with _SEL_LOCK:
+        if mid in _WORKER_MAP:
+            _ACTIVE["worker"] = _WORKER_MAP[mid]
+            _ACTIVE["worker_explicit"] = True
+        elif mid in _ORCH_PICK_IDS:
+            _ACTIVE["orch"] = mid
+            if not _ACTIVE["worker_explicit"]:
+                _ACTIVE["worker"] = mid
+        # else: stock (opus/sonnet/haiku) or unknown id -> not a selection.
+        orch = _ACTIVE["orch"]
+        worker = _ACTIVE["worker"]
+    target = (orch or worker) if tier == "heavy" else (worker or orch)
+    return target or mid
+
+
+def _wire_orchestrator_worker():
+    """Populate the orchestrator-pick ids + worker map from UC_MODELS, and append
+    a synthesized "Worker -> X" picker entry (routed like its base model) for each
+    advertised model. Idempotent; called from main() after models/slots load."""
+    if not (ORCH_WORKER and UC_MODELS):
+        return
+    for m in list(UC_MODELS):
+        mid = m.get("id")
+        if not mid or mid in _WORKER_MAP or mid.startswith(WORKER_ID_PREFIX):
+            continue
+        _ORCH_PICK_IDS.add(mid)
+        suffix = mid[len("claude-"):] if mid.startswith("claude-") else mid
+        wid = WORKER_ID_PREFIX + suffix
+        if wid in _WORKER_MAP:
+            continue
+        _WORKER_MAP[wid] = mid
+        UC_MODELS.append({
+            "type": "model", "id": wid,
+            "display_name": "Worker \u2192 %s" % m.get("display_name", mid),
+            "created_at": m.get("created_at") or "2025-01-01T00:00:00Z",
+        })
+        if mid in UC_SLOT_MAP and wid not in UC_SLOT_MAP:
+            UC_SLOT_MAP[wid] = dict(UC_SLOT_MAP[mid])
+    if _WORKER_MAP:
+        log("orchestrator+worker enabled: %d model(s), worker ids: %s"
+            % (len(_ORCH_PICK_IDS), ", ".join(sorted(_WORKER_MAP))))
+
+
+# --------------------------------------------------------------------------
 # UltraCode envelope (the heart of the proxy)
 # --------------------------------------------------------------------------
 
@@ -308,10 +404,22 @@ def transform_messages_body(raw: bytes):
     model_before = body.get("model")
     route = {}
 
-    slot = UC_SLOT_MAP.get(model_before)
+    # Orchestrator/Worker: classify tier and remap the model id to the selected
+    # orchestrator (heavy) or worker (fast) model. This also captures the dynamic
+    # workflow's stock-model background traffic so it follows your pick.
+    tier = _request_tier(body)
+    routed_id = _select_target(model_before, tier)
+    if routed_id != model_before:
+        body["model"] = routed_id
+        changed = True
+    if TIER_LOG:
+        remap = ("%s->%s" % (model_before, routed_id)) if routed_id != model_before else (model_before or "-")
+        log("tier=%s model=%s" % (tier, remap))
+
+    slot = UC_SLOT_MAP.get(body.get("model"))
     if isinstance(slot, dict):
         target_model = slot.get("model")
-        if target_model and target_model != model_before:
+        if target_model and target_model != body.get("model"):
             body["model"] = target_model
             changed = True
         up = slot.get("upstream")
@@ -626,6 +734,14 @@ def _oai_response_to_events(resp):
                     piece = delta.get("content")
                     if piece:
                         yield {"type": "text_delta", "text": piece}
+                    # Reasoning models (MiniMax-M3, DeepSeek-R*, ...) stream their
+                    # chain-of-thought under reasoning_content before the first
+                    # answer token. We keep it OUT of the answer, but surface it as
+                    # a reasoning_delta so the proxy can keep the pipe alive instead
+                    # of showing "dead air" while the model thinks.
+                    rc = delta.get("reasoning_content") or delta.get("reasoning")
+                    if rc:
+                        yield {"type": "reasoning_delta", "text": rc}
                     for tc in (delta.get("tool_calls") or []):
                         idx = int(tc.get("index", 0))
                         slot = pending.setdefault(idx, {"id": "", "name": "", "args": ""})
@@ -1090,6 +1206,11 @@ class Handler(BaseHTTPRequestHandler):
                         "delta": {"type": "text_delta", "text": txt}}))
                     self.wfile.flush()
                     emitted = True
+                elif et == "reasoning_delta":
+                    # Keep the pipe alive while a reasoning model thinks (no dead
+                    # air), without leaking the chain-of-thought into the answer.
+                    self.wfile.write(_sse("ping", {"type": "ping"}))
+                    self.wfile.flush()
                 elif et == "tool_call":
                     if text_open:
                         close_block()
@@ -1247,6 +1368,7 @@ def main():
 
     UC_SLOT_MAP = _routes_to_slots(cfg.get("routes"))
     UC_MODELS = _models_from_config(cfg.get("models"))
+    _wire_orchestrator_worker()
     if UC_MODELS:
         log("  advertising %d model(s) on GET /v1/models:" % len(UC_MODELS))
         for m in UC_MODELS:

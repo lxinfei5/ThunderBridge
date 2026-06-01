@@ -41,6 +41,32 @@ the ones you have a plan for, delete the rest. (Cursor's Composer needs the
 > backend gets the UltraCode treatment. Full breakdown (with the reverse‑engineering
 > evidence) in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
+## Orchestrator + Worker: two models, one workflow 🪄
+
+Claude Code's `/model` menu is single-slot — and its **dynamic-workflow** engine
+quietly issues most of its background/sub-agent traffic as the *stock* model
+(`claude-opus-4-8`) no matter what you pick. So the dozens of parallel workers
+that do the bulk of a workflow don't follow your selection (and can bill a model
+you didn't choose).
+
+This proxy turns that single slot into **two**. For every model you configure it
+auto-adds a `Worker → <model>` entry, so `/model` lets you choose an
+**orchestrator** (the main interactive loop) *and* a **worker** (every Workflow/
+Task sub-agent) independently:
+
+- Pick **one** model (e.g. `MiniMax-M3`) → it runs **everything**, orchestrator
+  *and* every parallel worker. One pick, your model end-to-end.
+- Pick an orchestrator **plus** a `Worker → X` → the smart model plans while a
+  cheaper/faster model fans out the parallel work.
+
+How it routes: the proxy classifies each request by a structural signal (the main
+loop carries interactive-only tools like `AskUserQuestion`; sub-agents never do),
+then sends the orchestrator tier to your orchestrator model and every worker to
+your worker model. The workflow's stock-model background calls are remapped to
+your picks too — so **"use MiniMax" really means MiniMax everywhere**, not Opus
+behind the scenes. Toggle off with `UC_ORCH_WORKER=0`. Workers run fully in
+parallel (threaded proxy, no artificial concurrency cap).
+
 ## Built for long, dynamic workflows ✨
 
 UltraCode shines on *long, autonomous* runs — deep reasoning, multi-step
@@ -63,9 +89,13 @@ keeps going instead of stalling:
   longer 400s strict backends like DeepSeek — the proxy repairs the tool-call
   sequence and synthesizes a stub reply for anything you didn't answer, including
   partial parallel calls. ([#3](https://github.com/OnlyTerp/UltraCode-Shim/issues/3))
+- **💬 No "dead air" while a model thinks.** Reasoning models (MiniMax‑M3, etc.)
+  can think for seconds before the first answer token. The proxy keeps the
+  connection live during that phase, so a workflow step looks busy instead of
+  frozen — without leaking the chain-of-thought into the answer.
 
-All three are tunable via env vars and locked down by the offline self-test in
-CI. Details and knobs: [docs/HOW_IT_WORKS.md → Reliability](docs/HOW_IT_WORKS.md#5-reliability--surviving-long-and-dynamic-workflows).
+All of these are tunable via env vars and locked down by the offline self-test in
+CI. Details and knobs: [docs/HOW_IT_WORKS.md → Reliability](docs/HOW_IT_WORKS.md#6-reliability--surviving-long-and-dynamic-workflows).
 
 ## Demo
 

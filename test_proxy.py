@@ -238,6 +238,47 @@ def main():
         assert tool_ids == ["call_1", "call_2"], tool_ids
         print("[ok] rejected/partial tool calls stay valid for strict backends (issue #3)")
 
+        # Orchestrator + Worker: the picker should advertise a "Worker -> X" entry
+        # per model, a plain pick should drive BOTH tiers (capturing the dynamic
+        # workflow's stock-model background traffic), and a worker pick should set
+        # only the worker tier. Tier is classified by interactive-only tools.
+        up.UC_MODELS = [
+            {"type": "model", "id": "claude-mock", "display_name": "Mock"},
+            {"type": "model", "id": "claude-mimo", "display_name": "MiMo"},
+        ]
+        up.UC_SLOT_MAP = {
+            "claude-mock": {"type": "openai_compat", "model": "mock-model"},
+            "claude-mimo": {"type": "openai_compat", "model": "mimo-v2.5-pro"},
+        }
+        up.ORCH_WORKER = True
+        up._ORCH_PICK_IDS.clear(); up._WORKER_MAP.clear()
+        up._ACTIVE.update({"orch": None, "worker": None, "worker_explicit": False})
+        up._wire_orchestrator_worker()
+        ow_ids = [x["id"] for x in up.UC_MODELS]
+        assert "claude-worker-mock" in ow_ids and "claude-worker-mimo" in ow_ids, ow_ids
+        assert up.UC_SLOT_MAP["claude-worker-mock"]["model"] == "mock-model"  # inherits base route
+
+        def _reset_sel():
+            up._ACTIVE.update({"orch": None, "worker": None, "worker_explicit": False})
+
+        assert up._request_tier({"tools": [{"name": "AskUserQuestion"}]}) == "heavy"
+        assert up._request_tier({"tools": [{"name": "Bash"}]}) == "fast"
+
+        _reset_sel()  # fresh session: stock model untouched until a pick happens
+        assert up._select_target("claude-opus-4-8", "heavy") == "claude-opus-4-8"
+
+        _reset_sel()  # plain pick -> BOTH tiers, captures stock background traffic
+        up._select_target("claude-mock", "heavy")
+        assert up._select_target("claude-opus-4-8", "heavy") == "claude-mock"
+        assert up._select_target("claude-opus-4-8", "fast") == "claude-mock"
+
+        _reset_sel()  # orchestrator mock + worker mimo
+        up._select_target("claude-mock", "heavy")
+        up._select_target("claude-worker-mimo", "fast")
+        assert up._select_target("claude-opus-4-8", "heavy") == "claude-mock"
+        assert up._select_target("claude-opus-4-8", "fast") == "claude-mimo"
+        print("[ok] orchestrator+worker: picker entries, tier routing, stock-traffic capture")
+
         print("\nALL TESTS PASSED")
         return 0
     finally:

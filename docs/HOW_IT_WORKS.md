@@ -70,7 +70,45 @@ id up in `config.json` → `routes` and forwards accordingly:
   `cursor-agent` CLI via `providers/cursor_agent.py`. Reasoning works well;
   tool-calling is a best-effort text bridge.
 
-## 5. Reliability — surviving long and dynamic workflows
+## 5. Orchestrator + Worker (two-model dynamic workflows)
+
+Claude Code's `/model` picker is single-slot, but its **dynamic-workflow** engine
+spawns many background/sub-agent calls — and it issues most of them as the stock
+model id (`claude-opus-4-8`) regardless of your pick. So the sub-agents that do
+the bulk of a workflow's work don't follow your selection, and can bill a model
+you didn't choose.
+
+The proxy fixes this by holding a **sticky two-tier selection** and routing every
+request by tier:
+
+| Tier | What it is | How it's detected | Routes to |
+|------|-----------|-------------------|-----------|
+| `heavy` | the orchestrator (main interactive loop) | the request carries an **interactive-only tool** (`AskUserQuestion` / `EnterPlanMode` / `ExitPlanMode`) that the harness only ever gives the main loop | your **orchestrator** model |
+| `fast` | every Workflow/Task **worker** / sub-agent + background call | no interactive-only tool present | your **worker** model |
+
+`main()` advertises a synthesized **`Worker → <name>`** entry (id
+`claude-worker-<x>`, routed exactly like its base model) for every model in your
+config, so the picker lists both an orchestrator and a worker choice for each
+backend. Selection rules:
+
+- A **plain pick** (e.g. `claude-minimax-m3`) sets **both** tiers → that model runs
+  everything.
+- A **`Worker → X` pick** sets only the worker tier → orchestrator stays whatever
+  you picked (or falls back to the worker).
+- **Stock ids** (`claude-opus-4-8`, sonnet, haiku — the workflow's hardcoded
+  background traffic) never change the selection; they're **remapped** to it. That
+  is what makes "use MiniMax" mean MiniMax for the whole workflow.
+
+The selection lives in the proxy process (one `claude` session), guarded by a
+lock, and resets when the proxy restarts. Disable the whole feature with
+`UC_ORCH_WORKER=0` (then a pick routes 1:1 and stock ids pass through untouched).
+Set `UC_TIER_LOG=1` to log the per-request tier + remap.
+
+**Parallelism.** The proxy is a `ThreadingHTTPServer`, so the N workers a workflow
+fans out are handled concurrently — there's no artificial serialization in the
+shim; throughput is bounded only by your backend's own rate limits.
+
+## 6. Reliability — surviving long and dynamic workflows
 
 UltraCode's value is *long, autonomous* runs (deep reasoning, multi-step
 Workflows, multi-agent fan-out). The weak point of any "translate to a third-party
@@ -118,18 +156,29 @@ rejecting a tool mid-run just works, on every backend.
 
 [i3]: https://github.com/OnlyTerp/UltraCode-Shim/issues/3
 
-### Reliability knobs
+### d. No "dead air" while a reasoning model thinks
+
+Reasoning models (MiniMax‑M3, DeepSeek‑R*, …) stream their chain-of-thought under
+`reasoning_content` for several seconds *before* the first answer token. We keep
+that thinking out of the visible answer — but a silent connection makes Claude
+Code's workflow UI look frozen. The proxy now surfaces each reasoning chunk as a
+keepalive on the stream, so the turn shows live activity while the model thinks,
+without leaking the chain-of-thought into the reply.
+
+### Reliability + workflow knobs
 
 | Env var | Default | What it does |
 |---------|---------|--------------|
 | `UC_EMPTY_RETRY_ATTEMPTS` | `2` | How many times to re-issue an empty/transient turn. |
 | `UC_EMPTY_RETRY_BACKOFF` | `0.75` | Seconds to wait between those retries. |
 | `UC_CODEX_STREAM_IDLE_TIMEOUT` | `150` | Per-read idle cap (s) on the codex stream so a stall retries instead of hanging. |
+| `UC_ORCH_WORKER` | `1` | Orchestrator+worker two-tier routing (§5). Set `0` to route each pick 1:1. |
+| `UC_TIER_LOG` | `0` | Log the per-request tier (`heavy`/`fast`) + any model remap. |
 
-All three are covered by the offline self-test (`test_proxy.py`) so they don't
+These are covered by the offline self-test (`test_proxy.py`) so they don't
 regress.
 
-## 6. What touches your machine
+## 7. What touches your machine
 
 - The launchers set env (`ANTHROPIC_BASE_URL`, discovery flag) for **the launched
   process only** and pass Claude Code a session-scoped `--settings` file. Your
