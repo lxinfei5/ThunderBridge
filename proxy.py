@@ -444,11 +444,48 @@ def anthropic_to_openai(body: dict) -> dict:
         if sys_txt.strip():
             messages.append({"role": "system", "content": sys_txt})
 
+    # OpenAI (and strict backends like DeepSeek) require every assistant message
+    # that carries tool_calls to be IMMEDIATELY followed by exactly one `tool`
+    # message per tool_call_id. Claude Code breaks that in two ways: (a) when a
+    # call is rejected-with-a-comment it puts the user's text alongside/ahead of
+    # the tool_result, and (b) for a rejected or unselected parallel call it sends
+    # no result at all. Both yield "insufficient tool messages following tool_calls
+    # message" (issue #3). We track the ids awaiting a reply, always emit the tool
+    # replies FIRST, and synthesize a stub for any id the client didn't answer.
+    pending_tool_ids = []  # mutated in place (never rebound) so the closure stays valid
+
+    def _flush_tool_replies(by_id):
+        for tid in pending_tool_ids:
+            tr = by_id.pop(tid, None)
+            if tr is not None:
+                messages.append({
+                    "role": "tool", "tool_call_id": tid,
+                    "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
+                })
+            else:
+                messages.append({
+                    "role": "tool", "tool_call_id": tid,
+                    "content": "Tool call was not executed (rejected or skipped by the user).",
+                })
+        # Stray results that didn't match a pending id (unusual) — keep them anyway.
+        for tid, tr in by_id.items():
+            messages.append({
+                "role": "tool", "tool_call_id": tid or "call_unknown",
+                "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
+            })
+        del pending_tool_ids[:]
+
     for m in body.get("messages", []):
         if not isinstance(m, dict):
             continue
         role = m.get("role", "user")
         content = m.get("content", "")
+
+        # Pending tool calls are only legitimately answered by the NEXT user turn.
+        # If any other message comes first, flush stubs so the tool_calls message
+        # isn't left bare (which strict backends reject).
+        if pending_tool_ids and role != "user":
+            _flush_tool_replies({})
 
         if role == "assistant" and isinstance(content, list):
             text_parts = []
@@ -473,29 +510,50 @@ def anthropic_to_openai(body: dict) -> dict:
             entry = {"role": "assistant", "content": "\n".join(p for p in text_parts if p)}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
+                pending_tool_ids[:] = [tc["id"] for tc in tool_calls]
             messages.append(entry)
             continue
 
-        if role == "user" and isinstance(content, list):
-            tool_results = [b for b in content
-                            if isinstance(b, dict) and b.get("type") == "tool_result"]
-            text_blocks = [b for b in content
-                           if not (isinstance(b, dict) and b.get("type") == "tool_result")]
-            text = _text_from_anthropic_content(text_blocks)
+        if role == "user":
+            if isinstance(content, list):
+                tool_results = [b for b in content
+                                if isinstance(b, dict) and b.get("type") == "tool_result"]
+                text_blocks = [b for b in content
+                               if not (isinstance(b, dict) and b.get("type") == "tool_result")]
+                text = _text_from_anthropic_content(text_blocks)
+            else:
+                tool_results = []
+                text = content if isinstance(content, str) else _text_from_anthropic_content(content)
+
+            # 1. Tool replies FIRST — immediately after the assistant's tool_calls,
+            #    in tool_call order, stubbing any the client left unanswered.
+            if pending_tool_ids:
+                by_id = {}
+                for tr in tool_results:
+                    by_id.setdefault(tr.get("tool_use_id") or "call_unknown", tr)
+                _flush_tool_replies(by_id)
+            else:
+                for tr in tool_results:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tr.get("tool_use_id") or "call_unknown",
+                        "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
+                    })
+
+            # 2. THEN the user's own text (e.g. the rejection comment).
             if text:
                 messages.append({"role": "user", "content": text})
-            for tr in tool_results:
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tr.get("tool_use_id") or "call_unknown",
-                    "content": _text_from_anthropic_content(tr.get("content")),
-                })
             continue
 
         # Plain string content or unexpected role.
         if role not in ("user", "assistant", "system", "tool"):
             role = "user"
         messages.append({"role": role, "content": _text_from_anthropic_content(content)})
+
+    # Transcript ended with tool calls still open (rare) — stub them so the final
+    # assistant tool_calls message stays valid for OpenAI-compatible backends.
+    if pending_tool_ids:
+        _flush_tool_replies({})
 
     out = {
         "model": body.get("model"),

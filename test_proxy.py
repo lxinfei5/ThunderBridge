@@ -188,6 +188,56 @@ def main():
         os.environ["MOCK_KEY"] = "secret123"
         assert up._expand_env("Bearer ${MOCK_KEY}") == "Bearer secret123"
         print("[ok] ${ENV} expansion in route auth")
+
+        # issue #3: a rejected tool call (with or without a comment) must not leave
+        # an assistant tool_calls message unanswered, and tool replies must come
+        # BEFORE the user's text — otherwise strict backends (DeepSeek) 400 with
+        # "insufficient tool messages following tool_calls message".
+        def _assert_tool_adjacency(msgs):
+            for i, mm in enumerate(msgs):
+                if mm.get("tool_calls"):
+                    need = [t["id"] for t in mm["tool_calls"]]
+                    got = []
+                    j = i + 1
+                    while j < len(msgs) and msgs[j].get("role") == "tool":
+                        got.append(msgs[j]["tool_call_id"]); j += 1
+                    assert got == need, ("tool_calls %s not immediately answered by %s"
+                                         % (need, got), msgs)
+
+        def _assistant_calls(*ids):
+            return {"role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}]
+                    + [{"type": "tool_use", "id": i, "name": "t", "input": {}} for i in ids]}
+
+        # (a) rejected with a comment + a tool_result present
+        m = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": "go"},
+            _assistant_calls("call_1"),
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "rejected"},
+                {"type": "text", "text": "no, do it differently"}]}]})["messages"]
+        _assert_tool_adjacency(m)
+        assert m[-1] == {"role": "user", "content": "no, do it differently"}, m  # comment AFTER tool
+
+        # (b) rejected with NO tool_result, only a user comment -> stub synthesized
+        m = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": "go"},
+            _assistant_calls("call_1"),
+            {"role": "user", "content": [{"type": "text", "text": "nah"}]}]})["messages"]
+        _assert_tool_adjacency(m)
+        assert any(x.get("role") == "tool" and x["tool_call_id"] == "call_1" for x in m), m
+
+        # (c) parallel calls, only one answered -> the other gets a stub
+        m = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": "go"},
+            _assistant_calls("call_1", "call_2"),
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "done"}]}]})["messages"]
+        _assert_tool_adjacency(m)
+        tool_ids = [x["tool_call_id"] for x in m if x.get("role") == "tool"]
+        assert tool_ids == ["call_1", "call_2"], tool_ids
+        print("[ok] rejected/partial tool calls stay valid for strict backends (issue #3)")
+
         print("\nALL TESTS PASSED")
         return 0
     finally:

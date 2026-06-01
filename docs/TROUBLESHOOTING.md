@@ -57,6 +57,25 @@ tools). Set `"type": "openai_compat"` for that route — the proxy then translat
 Anthropic `tool_use`/`tool_result` ⇄ OpenAI `tool_calls` both ways. Real Claude
 (passthrough) already handles tools natively.
 
+### Rejecting a tool call errors with "insufficient tool messages following tool_calls message"
+
+Symptom (seen on strict backends like DeepSeek via OpenCode Zen):
+
+```
+openai_compat upstream 400: ... An assistant message with 'tool_calls' must be
+followed by tool messages responding to each 'tool_call_id'.
+```
+
+When you **reject** (or skip) a tool call, Claude Code sends your typed comment in
+the same user turn as the tool result — and sometimes sends **no** result at all.
+OpenAI's format requires every assistant `tool_calls` message to be *immediately*
+followed by exactly one `tool` message per `tool_call_id`; strict backends reject
+anything else. The proxy now handles this for you: it emits the tool replies
+first (in order), **synthesizes a stub reply** for any call you didn't answer
+("Tool call was not executed…"), and puts your comment after. Same fix covers
+parallel tool calls where you only answer some. Just update to the latest
+`proxy.py` — no config change needed.
+
 ### The answer contains `<think>…</think>` reasoning (MiniMax‑M3 and other reasoning models)
 
 The model is inlining its chain‑of‑thought into the visible reply. For
