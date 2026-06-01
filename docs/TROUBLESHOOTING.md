@@ -57,6 +57,30 @@ tools). Set `"type": "openai_compat"` for that route — the proxy then translat
 Anthropic `tool_use`/`tool_result` ⇄ OpenAI `tool_calls` both ways. Real Claude
 (passthrough) already handles tools natively.
 
+### The answer contains `<think>…</think>` reasoning (MiniMax‑M3 and other reasoning models)
+
+The model is inlining its chain‑of‑thought into the visible reply. For
+**MiniMax‑M3**, add `"body": { "reasoning_split": true }` to its `openai_compat`
+route so the thinking is returned in a separate `reasoning_content` field instead
+of being dumped into the answer:
+
+```json
+"claude-minimax-m3": {
+  "type": "openai_compat",
+  "upstream": "https://api.minimax.io/v1",
+  "model": "MiniMax-M3",
+  "auth": "Bearer ${MINIMAX_API_KEY}",
+  "max_output_tokens": 64000,
+  "body": { "reasoning_split": true }
+}
+```
+
+The shipped `config.example.json` already sets this — if you wrote your own
+`config.json`, copy the `body` line over. Other reasoning backends may expose a
+similar flag under a different name; the generic `body` dict lets you pass
+whatever request param that provider documents. See
+[ADD_A_MODEL.md](ADD_A_MODEL.md#minimax-m3).
+
 ### Composer (`cursor_agent`) hangs or times out
 
 `cursor-agent` reaches Cursor's cloud on its own. If you're behind a

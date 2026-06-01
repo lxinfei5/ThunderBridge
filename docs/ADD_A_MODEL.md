@@ -71,8 +71,10 @@ llama.cpp / LM Studio server, etc. Tool calls are translated both ways.
 - `upstream` is the OpenAI **base URL exactly as the provider documents it**
   (usually ends in `/v1`). The proxy appends `/chat/completions`.
 - `model` is the backend's real model id, **not** the `claude-…` alias.
-- Optional: `headers` (a dict, values support `${VARS}`) and `max_output_tokens`
-  (completion cap, default 8192 — raise it if a backend supports longer output).
+- Optional: `headers` (a dict, values support `${VARS}`), `max_output_tokens`
+  (completion cap, default 8192 — raise it if a backend supports longer output),
+  and `body` (a dict merged into every request body, values support `${VARS}`) —
+  for provider-specific flags like MiniMax‑M3's `reasoning_split` (see below).
 
 A **local** server is the same, with a usually-ignored key:
 
@@ -84,6 +86,37 @@ A **local** server is the same, with a usually-ignored key:
   "auth": "Bearer local"
 }
 ```
+
+### MiniMax‑M3
+
+MiniMax‑M3 is OpenAI‑compatible (it's the `openai_compat` type), but it has one
+gotcha worth calling out:
+
+```json
+"claude-minimax-m3": {
+  "type": "openai_compat",
+  "upstream": "https://api.minimax.io/v1",
+  "model": "MiniMax-M3",
+  "auth": "Bearer ${MINIMAX_API_KEY}",
+  "max_output_tokens": 64000,
+  "body": { "reasoning_split": true }
+}
+```
+
+- **Get a key** at [platform.minimax.io](https://platform.minimax.io) → put it
+  inline or set `MINIMAX_API_KEY` (env or `ultracode.env`).
+- **`"body": { "reasoning_split": true }` is the important part.** M3 is a
+  reasoning model: by default it streams its chain‑of‑thought **inline** as
+  `<think>…</think>` right inside the answer, which clutters Claude Code's output
+  and confuses tool parsing. With `reasoning_split` on, the thinking is returned
+  in a separate `reasoning_content` field, so the visible answer stays clean.
+  Leave it out and you'll see raw `<think>` blocks in replies.
+- `model` is `MiniMax-M3` (capitalized exactly like that).
+- `max_output_tokens` can go up to **64000**; M3's context is ~1M tokens.
+- The `body` dict is generic — any `openai_compat` backend can use it to pass
+  provider‑specific request params (values support `${VARS}`).
+
+The shipped `config.example.json` already includes this entry — just add your key.
 
 ### Anthropic passthrough — real Claude or an Anthropic-compatible endpoint
 
@@ -137,6 +170,7 @@ plan/key for and delete the rest:
 | Picker label | id | `type` | backend |
 |--------------|----|--------|---------|
 | GPT-5.5 (Codex OAuth) | `claude-gpt-5.5-codex` | `codex_oauth` | `codex login` |
+| MiniMax-M3 | `claude-minimax-m3` | `openai_compat` | MiniMax (`reasoning_split`) |
 | MiMo v2.5 Pro | `claude-mimo` | `openai_compat` | Xiaomi MiMo |
 | DeepSeek V4 Pro/Flash | `claude-deepseek-v4-*` | `openai_compat` | DeepSeek |
 | Step Flash | `claude-step-flash` | `openai_compat` | StepFun |

@@ -14,6 +14,7 @@
   "_models": "What shows in Claude Code's /model picker. id MUST start with 'claude' or 'anthropic' (others are silently dropped). display_name is the label you see.",
   "models": [
     { "id": "claude-gpt-5.5-codex",     "display_name": "GPT-5.5 (Codex OAuth)" },
+    { "id": "claude-minimax-m3",        "display_name": "MiniMax-M3" },
     { "id": "claude-mimo",              "display_name": "MiMo v2.5 Pro" },
     { "id": "claude-deepseek-v4-pro",   "display_name": "DeepSeek V4 Pro" },
     { "id": "claude-deepseek-v4-flash", "display_name": "DeepSeek V4 Flash" },
@@ -31,6 +32,15 @@
       "_": "Needs `codex login` once; no API key. effort/tier via UC_CODEX_EFFORT/UC_CODEX_SERVICE_TIER.",
       "type": "codex_oauth",
       "model": "gpt-5.5"
+    },
+    "claude-minimax-m3": {
+      "_": "MiniMax-M3 via api.minimax.io (OpenAI-compatible). Get a key at platform.minimax.io. IMPORTANT: 'body.reasoning_split' keeps M3's <think> chain-of-thought OUT of the visible answer (delivered as reasoning_content instead). Drop it and you'll see raw <think>...</think> in replies. M3 supports ~1M context; max_output_tokens up to 64000.",
+      "type": "openai_compat",
+      "upstream": "https://api.minimax.io/v1",
+      "model": "MiniMax-M3",
+      "auth": "Bearer REPLACE_WITH_YOUR_MINIMAX_KEY",
+      "max_output_tokens": 64000,
+      "body": { "reasoning_split": true }
     },
     "claude-mimo": {
       "type": "openai_compat",

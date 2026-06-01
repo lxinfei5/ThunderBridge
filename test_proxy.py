@@ -120,7 +120,8 @@ def main():
             "claude-mock": {"type": "openai_compat", "model": "mock-model",
                             "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}",
                             "max_output_tokens": 1234,
-                            "headers": {"X-Test-UA": "openclaw/test"}},
+                            "headers": {"X-Test-UA": "openclaw/test"},
+                            "body": {"reasoning_split": True}},
             "claude-retry": {"type": "openai_compat", "model": "retry-model",
                              "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}"},
         },
@@ -166,6 +167,7 @@ def main():
         assert SEEN_OAI["tools"][0]["function"]["name"] == "get_weather", SEEN_OAI
         assert SEEN_OAI.get("tool_choice") == "auto"
         assert SEEN_OAI.get("max_tokens") == 1234, SEEN_OAI.get("max_tokens")  # slot cap honored
+        assert SEEN_OAI.get("reasoning_split") is True, SEEN_OAI  # route 'body' param merged (M3 needs this)
         hdr = {k.lower(): v for k, v in (SEEN_OAI_HEADERS or {}).items()}
         assert hdr.get("x-test-ua") == "openclaw/test", SEEN_OAI_HEADERS  # custom headers
         assert hdr.get("authorization") == "Bearer secret123", SEEN_OAI_HEADERS  # ${ENV} auth reached backend

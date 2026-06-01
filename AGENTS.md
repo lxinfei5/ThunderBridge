@@ -42,8 +42,9 @@ Run and confirm each:
 
 Ask the user which of these they have (only configure those):
 
-- An **API key** for an OpenAI-compatible service (MiMo, DeepSeek, OpenRouter,
-  OpenAI, Ollama, a local llama.cpp/LM Studio server, etc.) → use `openai_compat`.
+- An **API key** for an OpenAI-compatible service (MiniMax‑M3, MiMo, DeepSeek,
+  OpenRouter, OpenAI, Ollama, a local llama.cpp/LM Studio server, etc.) → use
+  `openai_compat`.
 - A **ChatGPT/Codex login** for GPT‑5.5 → use `codex_oauth` (run `codex login`).
 - Just **Claude** → they can still use it, routed as Anthropic passthrough. No
   savings, but UltraCode works.
@@ -64,6 +65,11 @@ Rules you must enforce:
 - For `openai_compat`, `model` is the backend's real model id (not the `claude-…` alias).
 - For `openai_compat`, `upstream` is the provider's base URL (usually ends in
   `/v1`); the proxy appends `/chat/completions`.
+- **Reasoning models that inline `<think>` (e.g. MiniMax‑M3):** add
+  `"body": { "reasoning_split": true }` to the route so the chain‑of‑thought is
+  split out of the visible answer. The shipped example already does this for
+  `claude-minimax-m3`. The `body` dict is the general way to pass any
+  provider‑specific request param.
 
 ## Phase 4 — Validate the real config
 

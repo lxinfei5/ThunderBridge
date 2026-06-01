@@ -71,6 +71,10 @@ ROUTE SHAPE (config.json "routes" object)
            ultracode.env that the launchers load).
   headers  optional dict of extra request headers (values support ${VARS}).
   max_output_tokens  optional completion cap for openai_compat (default 8192).
+  body     optional dict of extra params merged into the openai_compat request
+           body (values support ${VARS}). e.g. MiniMax-M3 needs
+           {"reasoning_split": true} so its <think> chain-of-thought is kept out
+           of the visible answer.
 """
 
 import json
@@ -193,6 +197,8 @@ def _routes_to_slots(routes):
             slot["max_output_tokens"] = route["max_output_tokens"]
         if isinstance(route.get("headers"), dict):
             slot["headers"] = {k: _expand_env(v) for k, v in route["headers"].items()}
+        if isinstance(route.get("body"), dict):
+            slot["body"] = route["body"]  # carried raw; ${ENV} expanded at use-site
         out[mid] = slot
     return out
 
@@ -323,6 +329,9 @@ def transform_messages_body(raw: bytes):
         hdrs = slot.get("headers")
         if isinstance(hdrs, dict):
             route["headers"] = {k: _expand_env(v) for k, v in hdrs.items()}
+        sbody = slot.get("body")
+        if isinstance(sbody, dict):
+            route["body"] = sbody
     elif model_before in UC_MODEL_MAP:
         body["model"] = UC_MODEL_MAP[model_before]
         changed = True
@@ -849,6 +858,14 @@ class Handler(BaseHTTPRequestHandler):
         # default (8192) unless the slot overrides it with max_output_tokens.
         cap = route.get("max_output_tokens")
         oai_body["max_tokens"] = int(cap) if cap else 8192
+        # Optional per-route extra body params merged into the OpenAI request.
+        # Lets a backend get provider-specific flags it needs, e.g. MiniMax-M3's
+        # "reasoning_split": true (keeps the model's <think> chain-of-thought out
+        # of the visible answer). Values support ${ENV} expansion.
+        extra_body = route.get("body")
+        if isinstance(extra_body, dict):
+            for bk, bv in extra_body.items():
+                oai_body[bk] = _expand_env(bv) if isinstance(bv, str) else bv
         payload = json.dumps(oai_body).encode("utf-8")
 
         # upstream is the OpenAI-compatible base URL you'd copy from the provider's

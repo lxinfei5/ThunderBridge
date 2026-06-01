@@ -19,10 +19,11 @@ all running with the full UltraCode harness. Your normal Claude Code install is
 left untouched.
 
 The example config ships ready-to-use entries for **GPT‑5.5 (Codex login)**,
-**MiMo v2.5 Pro**, **DeepSeek V4 Pro/Flash**, **Step Flash**, **Ollama Cloud**,
-**OpenCode Go**, **OpenRouter**, and **local models** — keep the ones you have a
-plan for, delete the rest. (Cursor's Composer needs the `cursor-agent` CLI and
-isn't HTTP-based — see [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
+**MiniMax‑M3**, **MiMo v2.5 Pro**, **DeepSeek V4 Pro/Flash**, **Step Flash**,
+**Ollama Cloud**, **OpenCode Go**, **OpenRouter**, and **local models** — keep
+the ones you have a plan for, delete the rest. (Cursor's Composer needs the
+`cursor-agent` CLI and isn't HTTP-based — see
+[docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
 
 <p align="center">
   <img src="assets/brand/features.png" alt="One icon, every model · stdlib-only proxy · tools translated both ways · your Claude stays untouched" width="100%">
@@ -142,6 +143,12 @@ Route types:
 | `openai_compat` | MiMo, DeepSeek, OpenRouter, OpenAI, Ollama, local llama.cpp — anything that speaks OpenAI Chat Completions (tools included) | an API key |
 | `codex_oauth`   | GPT‑5.5 via a ChatGPT/Codex login (no API key)     | `codex login` once |
 | `cursor_agent`  | Cursor Composer (experimental)                     | `cursor-agent login` |
+
+> **Reasoning models (MiniMax‑M3, etc.):** an `openai_compat` route can carry a
+> `"body": { ... }` dict of extra params merged into every request. **MiniMax‑M3**
+> needs `"body": { "reasoning_split": true }` so its `<think>` chain‑of‑thought is
+> returned separately instead of leaking into the visible answer — the shipped
+> example already sets this. See [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md#minimax-m3).
 
 Full walkthrough: [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).
 
