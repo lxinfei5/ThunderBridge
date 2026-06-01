@@ -41,6 +41,32 @@ the ones you have a plan for, delete the rest. (Cursor's Composer needs the
 > backend gets the UltraCode treatment. Full breakdown (with the reverse‑engineering
 > evidence) in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
+## Built for long, dynamic workflows ✨
+
+UltraCode shines on *long, autonomous* runs — deep reasoning, multi-step
+Workflows, multi-agent fan-out. The catch with any "route to a third-party
+backend" shim is that those backends occasionally hiccup, and on a 40-minute
+agent run a single unhandled hiccup can wedge the whole session. **We hardened
+the proxy against the three failure modes we actually hit in production**, so it
+keeps going instead of stalling:
+
+- **🔁 Empty turns auto-retry.** A backend that returns a turn with no text and no
+  tool call (a transient blip, or a budget-exhausted reasoning turn at high
+  effort) is transparently re-issued. It buffers only until the first real token,
+  so a normal turn adds **zero latency** and output is never duplicated — and it
+  never retries after real output or a fatal error.
+- **⏱️ A stalled stream can't freeze the run.** If a GPT‑5.5/codex stream opens and
+  then goes silent mid-turn, a bounded idle timeout turns the stall into a quick
+  retry instead of a ~10-minute hang — so one stuck sub-agent no longer freezes an
+  entire multi-agent / dynamic-workflow run.
+- **🛠️ Rejecting a tool call just works.** Declining (or skipping) a tool mid-run no
+  longer 400s strict backends like DeepSeek — the proxy repairs the tool-call
+  sequence and synthesizes a stub reply for anything you didn't answer, including
+  partial parallel calls. ([#3](https://github.com/OnlyTerp/UltraCode-Shim/issues/3))
+
+All three are tunable via env vars and locked down by the offline self-test in
+CI. Details and knobs: [docs/HOW_IT_WORKS.md → Reliability](docs/HOW_IT_WORKS.md#5-reliability--surviving-long-and-dynamic-workflows).
+
 ## Demo
 
 There's a ready-to-run scenario in [`examples/demo/`](examples/demo/) — a buggy

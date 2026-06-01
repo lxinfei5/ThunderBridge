@@ -70,7 +70,66 @@ id up in `config.json` → `routes` and forwards accordingly:
   `cursor-agent` CLI via `providers/cursor_agent.py`. Reasoning works well;
   tool-calling is a best-effort text bridge.
 
-## 5. What touches your machine
+## 5. Reliability — surviving long and dynamic workflows
+
+UltraCode's value is *long, autonomous* runs (deep reasoning, multi-step
+Workflows, multi-agent fan-out). The weak point of any "translate to a third-party
+backend" shim is that those backends occasionally hiccup — and on a 40-minute
+agent run, one hiccup that isn't handled can wedge the whole session. The proxy
+defends against the three failure modes we actually hit in production:
+
+### a. Empty turns are auto-retried
+
+Some upstreams intermittently return an assistant turn with **no text and no tool
+call** — a transient blip, or a budget-exhausted `response.incomplete` reasoning
+turn at high effort (notably GPT‑5.5 via codex). An empty turn is useless to
+Claude Code and can stall a Workflow step. `_events_with_retry()` transparently
+re-issues a fresh turn:
+
+- It **buffers only until the first meaningful event**, so a normal turn adds
+  **zero latency** and already-streamed output is never duplicated.
+- It retries only on an empty/transient result — **never** after meaningful
+  output, a fatal (non-retryable `4xx`) error, or partial output already streamed.
+- Tunable: `UC_EMPTY_RETRY_ATTEMPTS` (default `2`), `UC_EMPTY_RETRY_BACKOFF`
+  (default `0.75`s). Wraps both the `codex_oauth` and `openai_compat` paths.
+
+### b. A stalled stream can't freeze the whole run
+
+A codex stream can open (SSE established) and then go **silent mid-turn**.
+Previously that blocked on the 600s socket read timeout — so a single hung
+sub-agent could freeze an entire multi-agent / dynamic-workflow run for ~10
+minutes. The codex reader now uses a **bounded per-read idle timeout**
+(`UC_CODEX_STREAM_IDLE_TIMEOUT`, default `150`s): a stall becomes a *retryable*
+error, the empty-turn retry above re-attempts, and the workflow keeps moving.
+Lower it for faster recovery; raise it if your effort level legitimately produces
+long silent reasoning gaps before the first token.
+
+### c. Rejected / partial tool calls don't 400 strict backends
+
+OpenAI's format requires every assistant `tool_calls` message to be *immediately*
+followed by exactly one `tool` message per `tool_call_id`. When you **reject** a
+tool call, Claude Code puts your comment in the same turn as (or instead of) the
+tool result — which made strict backends like **DeepSeek** reject the next request
+with *"insufficient tool messages following tool_calls message"* ([#3][i3]). The
+translator now tracks the open tool-call ids, emits the tool replies **first** (in
+order), **synthesizes a stub reply** for any call you didn't answer (rejected or
+skipped — including partial *parallel* calls), then appends your comment. So
+rejecting a tool mid-run just works, on every backend.
+
+[i3]: https://github.com/OnlyTerp/UltraCode-Shim/issues/3
+
+### Reliability knobs
+
+| Env var | Default | What it does |
+|---------|---------|--------------|
+| `UC_EMPTY_RETRY_ATTEMPTS` | `2` | How many times to re-issue an empty/transient turn. |
+| `UC_EMPTY_RETRY_BACKOFF` | `0.75` | Seconds to wait between those retries. |
+| `UC_CODEX_STREAM_IDLE_TIMEOUT` | `150` | Per-read idle cap (s) on the codex stream so a stall retries instead of hanging. |
+
+All three are covered by the offline self-test (`test_proxy.py`) so they don't
+regress.
+
+## 6. What touches your machine
 
 - The launchers set env (`ANTHROPIC_BASE_URL`, discovery flag) for **the launched
   process only** and pass Claude Code a session-scoped `--settings` file. Your
