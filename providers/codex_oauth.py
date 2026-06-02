@@ -177,10 +177,33 @@ def _messages_to_responses_input(messages):
                     "arguments": fn.get("arguments") or "{}",
                 })
             continue
-        # user / default
-        text = content if isinstance(content, str) else json.dumps(content)
-        items.append({"type": "message", "role": "user",
-                      "content": [{"type": "input_text", "text": text}]})
+        # user / default. Content is either a plain string or a list of OpenAI
+        # chat parts ({"type":"text"} / {"type":"image_url"}) when the user pasted
+        # an image -- map those to the Responses API's input_text / input_image so
+        # vision-capable models (GPT-5.5) actually receive the image.
+        if isinstance(content, list):
+            parts = []
+            for p in content:
+                if not isinstance(p, dict):
+                    if p:
+                        parts.append({"type": "input_text", "text": str(p)})
+                    continue
+                ptype = p.get("type")
+                if ptype in ("text", "input_text"):
+                    parts.append({"type": "input_text", "text": p.get("text") or ""})
+                elif ptype == "image_url":
+                    iu = p.get("image_url")
+                    url = iu.get("url") if isinstance(iu, dict) else iu
+                    if url:
+                        parts.append({"type": "input_image", "image_url": url})
+                elif ptype == "input_image" and p.get("image_url"):
+                    parts.append({"type": "input_image", "image_url": p["image_url"]})
+            if not parts:
+                parts = [{"type": "input_text", "text": json.dumps(content)}]
+        else:
+            parts = [{"type": "input_text",
+                      "text": content if isinstance(content, str) else json.dumps(content)}]
+        items.append({"type": "message", "role": "user", "content": parts})
     return "\n\n".join(instructions), items
 
 

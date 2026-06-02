@@ -325,6 +325,31 @@ def main():
         assert tool_ids == ["call_1", "call_2"], tool_ids
         print("[ok] rejected/partial tool calls stay valid for strict backends (issue #3)")
 
+        # Image forwarding: a user image block must survive translation as a real
+        # image part (not a "[image omitted]" stub) so supports_images:true
+        # backends actually receive the picture -- for openai_compat (chat
+        # image_url) AND codex (Responses input_image). Text-only stays a string.
+        _img = {"type": "image", "source": {"type": "base64",
+                "media_type": "image/png", "data": "QUJD"}}
+        _oai = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [_img, {"type": "text", "text": "what is this?"}]}]})["messages"]
+        _u = [x for x in _oai if x["role"] == "user"][-1]
+        assert isinstance(_u["content"], list), _u
+        _ip = [p for p in _u["content"] if p.get("type") == "image_url"]
+        assert _ip and _ip[0]["image_url"]["url"] == "data:image/png;base64,QUJD", _u
+        assert any(p.get("type") == "text" and "what is this" in p.get("text", "") for p in _u["content"]), _u
+        _plain = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]}]})["messages"]
+        assert [x for x in _plain if x["role"] == "user"][-1]["content"] == "hi"  # text-only fast path unchanged
+        if up._codex_oauth is not None:
+            _instr, _items = up._codex_oauth._messages_to_responses_input(_oai)
+            _cp = [c for it in _items for c in (it.get("content") or [])]
+            assert any(c.get("type") == "input_image" and c.get("image_url") == "data:image/png;base64,QUJD"
+                       for c in _cp), _items
+            assert any(c.get("type") == "input_text" and "what is this" in c.get("text", "")
+                       for c in _cp), _items
+        print("[ok] image forwarding: user image -> openai_compat image_url + codex input_image")
+
         # Orchestrator + Worker: the picker should advertise a "Worker -> X" entry
         # per model, a plain pick should drive BOTH tiers (capturing the dynamic
         # workflow's stock-model background traffic), and a worker pick should set

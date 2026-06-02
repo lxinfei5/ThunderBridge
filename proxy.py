@@ -557,6 +557,59 @@ def _text_from_anthropic_content(content) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _oai_image_url_from_anthropic_source(source) -> str:
+    """Anthropic image `source` -> an OpenAI-style image URL string. A base64
+    source becomes a data: URL; a url source is passed through. "" if unusable."""
+    if not isinstance(source, dict):
+        return ""
+    stype = source.get("type")
+    if stype == "base64":
+        data = source.get("data") or ""
+        if not data:
+            return ""
+        return "data:%s;base64,%s" % (source.get("media_type") or "image/png", data)
+    if stype == "url":
+        return source.get("url") or ""
+    return ""
+
+
+def _content_has_image(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "image" for b in content)
+
+
+def _anthropic_content_to_oai(content):
+    """OpenAI chat `content` for a user message. Returns a plain string when the
+    content is text-only (the overwhelmingly common case -- behavior unchanged),
+    or a list of typed parts ({"type":"text"} / {"type":"image_url"}) when image
+    blocks are present, so vision-capable backends actually receive the image
+    instead of the "[image omitted]" stub."""
+    if not _content_has_image(content):
+        return content if isinstance(content, str) else _text_from_anthropic_content(content)
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            if block:
+                parts.append({"type": "text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text") or ""
+            if txt:
+                parts.append({"type": "text", "text": txt})
+        elif btype == "image":
+            url = _oai_image_url_from_anthropic_source(block.get("source"))
+            parts.append({"type": "image_url", "image_url": {"url": url}} if url
+                         else {"type": "text", "text": "[image omitted]"})
+        elif btype == "tool_result":
+            txt = _text_from_anthropic_content(block.get("content"))
+            if txt:
+                parts.append({"type": "text", "text": txt})
+    return parts or ""
+
+
 def _anthropic_tools_to_oai(tools):
     out = []
     for tool in tools or []:
@@ -681,10 +734,10 @@ def anthropic_to_openai(body: dict) -> dict:
                                 if isinstance(b, dict) and b.get("type") == "tool_result"]
                 text_blocks = [b for b in content
                                if not (isinstance(b, dict) and b.get("type") == "tool_result")]
-                text = _text_from_anthropic_content(text_blocks)
+                user_content = _anthropic_content_to_oai(text_blocks)
             else:
                 tool_results = []
-                text = content if isinstance(content, str) else _text_from_anthropic_content(content)
+                user_content = _anthropic_content_to_oai(content)
 
             # 1. Tool replies FIRST — immediately after the assistant's tool_calls,
             #    in tool_call order, stubbing any the client left unanswered.
@@ -701,9 +754,10 @@ def anthropic_to_openai(body: dict) -> dict:
                         "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
                     })
 
-            # 2. THEN the user's own text (e.g. the rejection comment).
-            if text:
-                messages.append({"role": "user", "content": text})
+            # 2. THEN the user's own content (text, plus any images as typed
+            #    parts) -- e.g. the rejection comment, or a pasted screenshot.
+            if user_content:
+                messages.append({"role": "user", "content": user_content})
             continue
 
         # Plain string content or unexpected role.
