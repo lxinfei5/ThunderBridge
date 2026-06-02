@@ -30,15 +30,30 @@ Run and confirm each:
 
 ## Phase 2 — Get the code + baseline check
 
+Fastest path — the one-command installer (clones if needed, runs the offline
+self-test, creates `config.json`, and installs a `ultracode` launcher on PATH):
+
+```
+# mac/linux/WSL
+curl -fsSL https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.sh | bash
+# windows (PowerShell)
+irm https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.ps1 | iex
+```
+
+If you already have a checkout, run `./install.sh` (or `.\install.ps1`) from
+inside it. Either way, the installer runs the **offline self-test** for you.
+
+If you'd rather do it by hand (or the installer can't run):
+
 1. Clone if not already: `git clone https://github.com/OnlyTerp/UltraCode-Shim.git`
 2. From the repo root run the doctor:
    ```
    python3 scripts/doctor.py
    ```
-   It runs an **offline self-test** (no network/keys) that proves the proxy,
-   discovery, the UltraCode envelope, and tool-call translation all work. If the
-   self-test fails, STOP and report the output — the install is broken, not the
-   user's config.
+
+Either way, the **offline self-test** (no network/keys) proves the proxy,
+discovery, the UltraCode envelope, and tool-call translation all work. If it
+fails, STOP and report the output — the install is broken, not the user's config.
 
 ## Phase 3 — Ask what they have, then configure
 
@@ -49,10 +64,15 @@ Ask the user which of these they have (only configure those):
   `openai_compat`.
 - A **ChatGPT/Codex login** for GPT‑5.5 → use `codex_oauth` (run `codex login`).
 - Just **Claude** → they can still use it, routed as Anthropic passthrough. No
-  savings, but UltraCode works.
+  savings, but UltraCode works. **You don't need to configure real Claude at
+  all:** the proxy always advertises the stock Claude models (Opus/Sonnet/Haiku)
+  in `/model` and keeps them there even with no Anthropic key. So the user always
+  has real Claude available; they only *add* cheaper backends. (Disable with
+  `proxy.include_stock_models: false` / `UC_INCLUDE_STOCK_MODELS=0` if they want
+  only their configured models.)
 
-Then edit **one file**: copy `config.example.json` → `config.json` (the launcher
-also does this on first run), and edit `config.json`:
+Then edit **one file**: copy `config.example.json` → `config.json` (the installer
+and launcher also do this on first run), and edit `config.json`:
 
 - `models` — one entry per model to show in `/model`. **Every `id` MUST start
   with `claude` or `anthropic`** or Claude Code drops it.
@@ -113,23 +133,28 @@ every `${VAR}` referenced by a route is present (or the key is inline), and
 `codex_oauth`/`cursor_agent` routes have their login/CLI. Fix every `[FAIL]`
 (each prints its fix) until exit code 0.
 
-## Phase 5 — Install icons / launch
+## Phase 5 — Launch
 
-- **Windows:** `./windows/Install-DesktopIcons.ps1` (creates "UltraCode (All Models)"
-  and "Claude Code (Normal)"). Or launch directly: `./windows/Start-UltraCode.ps1`.
-- **macOS/Linux/WSL:** `./bin/ultracode`.
+If you used the installer, just run `ultracode` (it's on PATH). Otherwise launch
+from the checkout:
+
+- **macOS/Linux/WSL:** `./bin/ultracode`
+- **Windows:** `./windows/Start-UltraCode.ps1` (or `./install.ps1 -DesktopIcons`
+  for "UltraCode (All Models)" + "Claude Code (Normal)" Desktop shortcuts).
 
 The launcher starts the proxy, seeds Claude Code's gateway-models cache from the
-live proxy (including synthesized `Worker → X` entries), opens the two-column
-selector, then passes the selected orchestrator as `claude --model ...`. Set
-`UC_SELECTOR=0` to skip the selector and choose from `/model` only.
+live proxy (the stock Claude models + the user's configured models + synthesized
+`Worker → X` entries), opens the two-column selector, then passes the selected
+orchestrator as `claude --model ...`. Set `UC_SELECTOR=0` to skip the selector and
+choose from `/model` only.
 
 ## Phase 6 — Verify end to end
 
 1. Launch UltraCode. Confirm the selector appears and can pick an orchestrator +
    worker (`Same as orchestrator` means one model runs everything).
-2. In Claude Code, type `/model` and confirm the user's custom models and
-   `Worker → X` entries appear (the proxy serves them on `GET /v1/models`).
+2. In Claude Code, type `/model` and confirm BOTH appear: the stock Claude models
+   (Opus/Sonnet/Haiku) **and** the user's custom models + `Worker → X` entries
+   (the proxy serves all of them on `GET /v1/models`).
 3. Send a trivial prompt ("say OK"). Confirm a reply uses the selected model.
 4. Pick one that needs tools and ask something requiring a tool call; confirm tools
    fire (the proxy translates tool calls both ways).
@@ -142,6 +167,9 @@ If a model doesn't appear or errors, go to `docs/TROUBLESHOOTING.md` and match t
 symptom. Common ones:
 - Model missing from `/model` → id didn't start with `claude`/`anthropic`, or
   discovery env not set (the launcher sets `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`).
+- Real Claude (Opus/etc.) missing from `/model` → only if stock models were turned
+  off (`proxy.include_stock_models: false` / `UC_INCLUDE_STOCK_MODELS=0`); they're
+  on by default.
 - "responded but never called tools" → that route must be `openai_compat` (not
   passthrough) so tools are translated.
 - 401/empty from a backend → wrong/empty key in `config.json`, or expired

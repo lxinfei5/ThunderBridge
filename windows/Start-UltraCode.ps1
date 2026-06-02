@@ -166,16 +166,26 @@ if (Test-ProxyHealthy) {
 }
 
 # ----- seed Claude Code's gateway-models cache (first-launch visibility) -----
+# Seed stock Claude + your configured models so real Claude and your picks all
+# show on the very first /model open (before Claude Code re-fetches /v1/models).
 $CfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $GwCache = Join-Path (Join-Path $CfgDir "cache") "gateway-models.json"
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path $GwCache) | Out-Null
     $health = Invoke-RestMethod -Uri "$BaseUrl/healthz" -TimeoutSec 2
-    $models = @($health.custom_models | ForEach-Object { [ordered]@{ id = $_.id; display_name = $_.display_name } })
+    $models = [System.Collections.ArrayList]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($src in @($health.stock_models, $health.custom_models)) {
+        foreach ($m in @($src)) {
+            if ($m -and $m.id -and $seen.Add([string]$m.id)) {
+                [void]$models.Add([ordered]@{ id = $m.id; display_name = $m.display_name })
+            }
+        }
+    }
     $seed = [ordered]@{
         baseUrl   = $BaseUrl
         fetchedAt = [int64]([datetimeoffset](Get-Date)).ToUnixTimeMilliseconds()
-        models    = $models
+        models    = @($models)
     }
     $seed | ConvertTo-Json -Depth 5 | Set-Content -Path $GwCache -Encoding utf8
     Write-Host "Seeded gateway-models cache ($(@($models).Count) models)."

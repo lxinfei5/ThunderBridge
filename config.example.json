@@ -8,7 +8,9 @@
     "_anthropic_upstream": "Where the real Anthropic API lives. Don't change unless you know why.",
     "anthropic_upstream": "https://api.anthropic.com",
     "_max_tokens_floor": "Ultracode raises every request to at least this many max_tokens. 64000 matches real ultracode.",
-    "max_tokens_floor": 64000
+    "max_tokens_floor": 64000,
+    "_include_stock_models": "Always show the real Claude models (Opus/Sonnet/Haiku) in /model alongside your configured ones, so real Claude never disappears from the picker even when there's no Anthropic key to list them. true (default) is what you want; set false to show ONLY your configured models. Env override: UC_INCLUDE_STOCK_MODELS=0.",
+    "include_stock_models": true
   },
 
   "_models": "What shows in Claude Code's /model picker. id MUST start with 'claude' or 'anthropic' (others are silently dropped). display_name is the label you see. 'claude-auto' is the Auto Router (see the 'router' section below): pick it and the proxy chooses the cheapest configured backend that can handle each task.",

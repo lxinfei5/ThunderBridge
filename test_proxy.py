@@ -9,7 +9,7 @@ OpenAI<->Anthropic tool-call translation, and ${ENV} expansion in routes.
 
 Used by scripts/doctor.py and by CI.
 """
-import json, os, sys, threading, time, urllib.request, subprocess, signal
+import json, os, re, sys, threading, time, urllib.request, subprocess, signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 GW = os.path.dirname(os.path.abspath(__file__))
@@ -184,10 +184,17 @@ def main():
         assert h["ok"] and h["codex_helper"], h
         print("[ok] healthz + codex helper importable")
 
-        ids = [x["id"] for x in json.loads(_get("/v1/models"))["data"]]
+        models_payload = json.loads(_get("/v1/models"))["data"]
+        ids = [x["id"] for x in models_payload]
         assert "claude-mock" in ids and "claude-opus-4-8" in ids, ids
         assert "claude-auto" in ids, ids  # Auto Router picker is discoverable
-        print("[ok] /v1/models discovery merge:", ids)
+        # Stock Claude models are always advertised so real Claude never drops out
+        # of /model, even with no Anthropic key to list them upstream.
+        for sid in ("claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"):
+            assert sid in ids, ("stock model %s missing from /v1/models" % sid, ids)
+        # No duplicate ids even though the mock upstream ALSO returns claude-opus-4-8.
+        assert len(ids) == len(set(ids)), ("duplicate ids in /v1/models", ids)
+        print("[ok] /v1/models discovery merge (stock + custom, deduped):", ids)
 
         h2 = json.loads(_get("/healthz"))
         assert h2["router"]["enabled"] and h2["router"]["id"] == "claude-auto", h2["router"]
@@ -255,6 +262,34 @@ def main():
         os.environ["MOCK_KEY"] = "secret123"
         assert up._expand_env("Bearer ${MOCK_KEY}") == "Bearer secret123"
         print("[ok] ${ENV} expansion in route auth")
+
+        # Stock Claude models: the built-in fallback so real Claude stays in
+        # /model even with no upstream list. Toggle + override are honored, and
+        # every advertised id obeys Claude Code's /^(claude|anthropic)/i rule.
+        _saved_inc = up.INCLUDE_STOCK_MODELS
+        try:
+            up.INCLUDE_STOCK_MODELS = True
+            os.environ.pop("UC_STOCK_MODELS", None)
+            stock_ids = [m["id"] for m in up._stock_models()]
+            assert "claude-opus-4-8" in stock_ids and "claude-sonnet-4-6" in stock_ids, stock_ids
+            assert all(re.match(r"^(claude|anthropic)", i, re.I) for i in stock_ids), stock_ids
+            assert all(m["type"] == "model" and m["display_name"] for m in up._stock_models())
+            # Disable switch -> no stock models advertised.
+            up.INCLUDE_STOCK_MODELS = False
+            assert up._stock_models() == [], "UC_INCLUDE_STOCK_MODELS=0 must drop stock models"
+            up.INCLUDE_STOCK_MODELS = True
+            # CSV override, with a junk id that must be filtered by the id rule.
+            os.environ["UC_STOCK_MODELS"] = "claude-opus-4-8, gpt-4o, claude-haiku-4-5"
+            ov = [m["id"] for m in up._stock_models()]
+            assert ov == ["claude-opus-4-8", "claude-haiku-4-5"], ov
+            # JSON-object override carries a custom display_name.
+            os.environ["UC_STOCK_MODELS"] = '[{"id":"claude-opus-4-8","display_name":"My Opus"}]'
+            ov2 = up._stock_models()
+            assert ov2 and ov2[0]["display_name"] == "My Opus", ov2
+        finally:
+            os.environ.pop("UC_STOCK_MODELS", None)
+            up.INCLUDE_STOCK_MODELS = _saved_inc
+        print("[ok] stock Claude models: fallback list, disable toggle, override parsing")
 
         # Auto Router unit logic (in-process): cheapest-among-viable selection,
         # the image hard-zero, the below-bar best-effort pick, score parsing

@@ -42,10 +42,30 @@ gateway and lists what comes back in `/model`. The launchers set that env var an
 also pre-seed Claude Code's `cache/gateway-models.json` so your models show on
 the very first open.
 
+The proxy's `GET /v1/models` returns the union of three sources, deduped by id:
+
+1. **Stock Claude models** — a built-in list (Opus 4.8/4.7, Sonnet 4.6, Haiku
+   4.5) that's *always* served, so real Claude never drops out of the picker.
+2. **Anthropic's own `/v1/models`** — fetched live and merged in when a credential
+   is available to forward; if that fetch can't run (no key, offline, a hiccup)
+   the stock list above stands in for it.
+3. **Your configured models** — everything in `config.json` → `models`, plus the
+   synthesized `Worker → X` entries.
+
+So even with **no Anthropic key to list models upstream**, you still see real
+Claude *and* your own backends. (Earlier builds served custom-only on an upstream
+miss, which is why Opus could vanish from `/model`.) Turn the stock list off with
+`proxy.include_stock_models: false` or `UC_INCLUDE_STOCK_MODELS=0`; override the
+exact list with `UC_STOCK_MODELS`. The stock ids are advertised only — they are
+**not** orchestrator/worker picks, so the workflow's hardcoded `claude-opus-4-8`
+background traffic is still remapped onto your pick (see §5) instead of hijacking
+the selection.
+
 > **Hard rule from Claude Code:** discovered ids are filtered with
 > `/^(claude|anthropic)/i`. Any model id that does **not** start with `claude`
 > or `anthropic` is silently dropped. That's why every `id` in `config.json`
-> looks like `claude-mimo`, `claude-openrouter`, etc.
+> looks like `claude-mimo`, `claude-openrouter`, etc. (The proxy applies the same
+> rule to the stock list and any `UC_STOCK_MODELS` override.)
 
 Gateway discovery only triggers on a first-party (OAuth) login, not on a raw
 `ANTHROPIC_API_KEY`.

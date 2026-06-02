@@ -25,6 +25,24 @@ The proxy log is at:
 - **You're not on an OAuth login.** Gateway discovery only triggers for
   first-party (OAuth) logins, not raw `ANTHROPIC_API_KEY` keys.
 
+### Real Claude (Opus / Sonnet / Haiku) is missing from `/model`
+
+You don't configure real Claude — the proxy always advertises the stock Claude
+models so Opus/Sonnet/Haiku stay in the picker even when there's no Anthropic key
+to list them upstream. If they're missing:
+
+- **Stock models were turned off.** Check you didn't set
+  `proxy.include_stock_models: false` in `config.json` or
+  `UC_INCLUDE_STOCK_MODELS=0` in the environment. They're on by default.
+- **A custom `UC_STOCK_MODELS` override.** If you set this env var, only the ids
+  you listed are advertised. Unset it for the built-in list, or include the ids
+  you want (e.g. `UC_STOCK_MODELS='claude-opus-4-8,claude-sonnet-4-6'`).
+- **Stale discovery cache.** Close and reopen `/model`, or restart Claude Code —
+  the launcher pre-seeds the cache with stock + your models on every launch.
+- **Old version.** Earlier builds served custom-only when the upstream
+  `/v1/models` fetch failed, so Opus could vanish. `git pull` (or re-run the
+  installer) to get the always-on stock list.
+
 ### The pre-launch selector doesn't open / says it cannot reach `/uc/select`
 
 - **Proxy not healthy yet or wrong port.** The launcher starts the proxy before
@@ -169,6 +187,30 @@ exact argument names.
 ```
 powershell -ExecutionPolicy Bypass -File .\windows\Start-UltraCode.ps1
 ```
+
+(The `irm ... | iex` install one-liner runs in your current session, so it isn't
+blocked by execution policy. The same applies to a downloaded `install.ps1` you
+dot-source; only saved `.ps1` files you invoke directly need the bypass.)
+
+### `ultracode` isn't found after install
+
+The installer puts the launcher in your bin dir (`~/.local/bin` on mac/linux,
+`%LOCALAPPDATA%\Microsoft\WindowsApps` on Windows) and tells you if that dir
+isn't on `PATH` yet. If `ultracode` isn't found:
+
+- **Re-open your terminal** so a freshly-added PATH entry takes effect.
+- **Add the bin dir to PATH** using the exact line the installer printed, or pass
+  `--bin-dir` / `-BinDir` to install somewhere already on PATH.
+- **Or just run it directly** — the installer prints the full path to the shim.
+- **Re-point it** at a moved checkout by re-running the installer from the clone.
+
+### The installer's self-test failed
+
+The installer runs the offline self-test on **auto-picked free ports** before
+installing. If it fails, the clone is broken (not your config) — re-run with
+`--no-test` / `-NoTest` only to confirm the rest of the install, then run
+`python3 test_proxy.py` and report the output. A `git pull` (or re-running the
+installer) usually fixes a stale/partial checkout.
 
 ### Claude Code isn't found by the launcher
 

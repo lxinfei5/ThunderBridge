@@ -65,6 +65,12 @@ def looks_like_placeholder(s):
     return isinstance(s, str) and bool(re.search(r"REPLACE_WITH|your-|YOUR_", s))
 
 
+def proxy_cfg_get(cfg, key, default=None):
+    """Read a key from the config's 'proxy' block, tolerating a missing block."""
+    proxy = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
+    return proxy.get(key, default)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-test", action="store_true", help="skip the proxy self-test")
@@ -131,6 +137,16 @@ def main():
             discovery_fails += 1
     if model_ids and discovery_fails == 0:
         ok("all advertised model ids are discoverable and routed")
+
+    # 5.5 stock Claude models (real Claude stays in /model even with no upstream key)
+    include_stock = os.environ.get("UC_INCLUDE_STOCK_MODELS",
+                                   "0" if proxy_cfg_get(cfg, "include_stock_models") is False else "1") != "0"
+    if include_stock:
+        ok("stock Claude models (Opus/Sonnet/Haiku) will also appear in /model "
+           "(real Claude never drops out; disable with UC_INCLUDE_STOCK_MODELS=0)")
+    else:
+        note("stock Claude models are disabled (UC_INCLUDE_STOCK_MODELS=0 / "
+             "proxy.include_stock_models=false) - only your configured models will show")
 
     # 6. per-route backend checks
     for name, route in routes.items():
@@ -233,9 +249,12 @@ def main():
         print("Fix the [FAIL] lines above, then re-run: python3 scripts/doctor.py")
         return 1
     if using_example:
-        print("Looks good. Copy config.example.json to config.json and keep the models you have.")
+        print("Looks good. Run the installer to set up config.json + the `ultracode` "
+              "command:\n  mac/linux/WSL:  ./install.sh\n  windows:        .\\install.ps1")
     else:
-        print("Ready. Launch: windows\\Start-UltraCode.ps1  (or  bin/ultracode  on mac/linux).")
+        print("Ready. Launch with:  ultracode   (after ./install.sh or .\\install.ps1)")
+        print("  or directly:       bin/ultracode  (mac/linux/WSL)  |  "
+              "windows\\Start-UltraCode.ps1")
     return 0
 
 

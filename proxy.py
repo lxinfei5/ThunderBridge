@@ -17,11 +17,15 @@ Claude Code talks to ANTHROPIC_BASE_URL. Point that at this proxy and it:
      UltraCode is at the API boundary -- there is no secret model or field.)
 
   2. Serves GET /v1/models, merging the real Anthropic list with your own
-     custom models (config.json "models"). With Claude Code's gateway model
-     discovery enabled (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) those
-     custom models appear in the /model picker. NOTE: Claude Code only keeps
-     model ids matching /^(claude|anthropic)/i, so every custom id MUST start
-     with "claude" or "anthropic".
+     custom models (config.json "models") AND a built-in set of stock Anthropic
+     models (real Claude -- Opus/Sonnet/Haiku). The stock set is always offered
+     so real Claude never disappears from /model, even when the upstream
+     /v1/models fetch can't run (no Anthropic credential to forward, offline,
+     etc.). With Claude Code's gateway model discovery enabled
+     (CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1) those models appear in the
+     /model picker. NOTE: Claude Code only keeps model ids matching
+     /^(claude|anthropic)/i, so every custom id MUST start with "claude" or
+     "anthropic".
 
   3. Routes each model id Claude Code sends to a real backend (config.json "routes"):
         - Anthropic passthrough  (real Claude, or any Anthropic endpoint)
@@ -41,6 +45,12 @@ ENV KNOBS
   UC_FORCE_EFFORT    default xhigh   (set empty to leave effort untouched)
   UC_FORCE_THINKING  default 1       (1 => force adaptive thinking)
   UC_INJECT_REMINDER default 1       (1 => inject the ultracode reminder)
+  UC_INCLUDE_STOCK_MODELS default 1  (1 => always advertise stock Claude models
+                     -- Opus/Sonnet/Haiku -- on /v1/models so real Claude never
+                     drops out of the picker; 0 to advertise only your config)
+  UC_STOCK_MODELS    optional JSON/CSV overriding the built-in stock list, e.g.
+                     '["claude-opus-4-8","claude-sonnet-4-6"]' or a JSON array of
+                     {"id","display_name"} objects
   UC_CONFIG          path to config.json (default: config.json beside proxy.py,
                      falling back to config.example.json)
   UC_MODEL_MAP       optional JSON, e.g. {"claude-opus-4-8":"my-model"}
@@ -83,6 +93,7 @@ ROUTE SHAPE (config.json "routes" object)
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -102,6 +113,7 @@ MAX_TOKENS_FLOOR = int(os.environ.get("UC_MAX_TOKENS", "64000"))
 FORCE_EFFORT = os.environ.get("UC_FORCE_EFFORT", "xhigh")
 FORCE_THINKING = os.environ.get("UC_FORCE_THINKING", "1") == "1"
 INJECT_REMINDER = os.environ.get("UC_INJECT_REMINDER", "1") == "1"
+INCLUDE_STOCK_MODELS = os.environ.get("UC_INCLUDE_STOCK_MODELS", "1") != "0"
 VERBOSE = os.environ.get("UC_VERBOSE", "0") == "1"
 _LOG_PATH = os.environ.get("UC_LOG", "")
 
@@ -226,6 +238,71 @@ def _models_from_config(models):
             "id": mid,
             "display_name": m.get("display_name") or mid,
             "created_at": m.get("created_at") or "2025-01-01T00:00:00Z",
+        })
+    return out
+
+
+# Stock (real Claude) models. These are advertised on /v1/models in addition to
+# whatever Anthropic's own /v1/models returns, so real Claude never disappears
+# from the /model picker -- e.g. when there's no Anthropic credential to forward
+# upstream, or the upstream fetch hiccups. They are NOT orchestrator/worker
+# picker entries: stock ids must keep flowing through _select_target untouched
+# so the dynamic-workflow background traffic (hardcoded to claude-opus-4-8) can
+# still be remapped onto your pick instead of hijacking the selection. Override
+# with UC_STOCK_MODELS; disable entirely with UC_INCLUDE_STOCK_MODELS=0.
+STOCK_MODELS = [
+    {"id": "claude-opus-4-8",   "display_name": "Claude Opus 4.8"},
+    {"id": "claude-opus-4-7",   "display_name": "Claude Opus 4.7"},
+    {"id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6"},
+    {"id": "claude-haiku-4-5",  "display_name": "Claude Haiku 4.5"},
+]
+
+
+def _parse_stock_override(raw):
+    """UC_STOCK_MODELS may be a JSON array of ids, a JSON array of
+    {"id","display_name"} objects, or a comma-separated list of ids. Returns a
+    normalized [{"id","display_name"}] list, or None if the var is unset/empty
+    (use the built-in default) -- an explicit empty list disables stock models."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    parsed = None
+    if raw[0] in "[{":
+        try:
+            parsed = json.loads(raw)
+        except Exception as e:
+            log("UC_STOCK_MODELS is not valid JSON (%s); using the built-in stock list" % e)
+            return None
+    if parsed is None:  # CSV form: "claude-opus-4-8, claude-sonnet-4-6"
+        parsed = [s.strip() for s in raw.split(",")]
+    out = []
+    for item in parsed if isinstance(parsed, list) else []:
+        if isinstance(item, str) and item.strip():
+            mid = item.strip()
+            out.append({"id": mid, "display_name": mid})
+        elif isinstance(item, dict) and item.get("id"):
+            out.append({"id": item["id"],
+                        "display_name": item.get("display_name") or item["id"]})
+    return out
+
+
+def _stock_models():
+    """The stock Claude models to advertise, after applying UC_STOCK_MODELS and
+    the /^(claude|anthropic)/i id rule Claude Code enforces on discovery."""
+    if not INCLUDE_STOCK_MODELS:
+        return []
+    override = _parse_stock_override(os.environ.get("UC_STOCK_MODELS"))
+    base = STOCK_MODELS if override is None else override
+    out = []
+    for m in base:
+        mid = m.get("id")
+        if not mid or not re.match(r"^(claude|anthropic)", mid, re.I):
+            continue
+        out.append({
+            "type": "model",
+            "id": mid,
+            "display_name": m.get("display_name") or mid,
+            "created_at": "2025-01-01T00:00:00Z",
         })
     return out
 
@@ -1350,6 +1427,8 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 "custom_models": [{"id": m["id"], "display_name": m["display_name"]}
                                   for m in UC_MODELS],
+                "stock_models": [{"id": m["id"], "display_name": m["display_name"]}
+                                 for m in _stock_models()],
                 "slots": {k: {"type": v.get("type", "passthrough"),
                               "model": v.get("model"),
                               "upstream": v.get("upstream", "(default)")}
@@ -1414,7 +1493,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- /v1/models discovery -------------------------------------------
     def _handle_models(self) -> bool:
-        if not UC_MODELS:
+        # We answer /v1/models whenever there's anything to add to (or stand in
+        # for) the upstream list: your configured models OR the built-in stock
+        # Claude models. Only when both are empty do we let the request pass
+        # straight through unchanged.
+        stock = _stock_models()
+        if not UC_MODELS and not stock:
             return False
         fwd_headers = {k: v for k, v in self.headers.items()
                        if k.lower() not in _HOP_BY_HOP}
@@ -1428,15 +1512,22 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(parsed, dict) and isinstance(parsed.get("data"), list):
                 base = parsed
         except Exception as e:
-            vlog("/v1/models upstream fetch failed, serving custom-only: %s" % e)
+            # No usable upstream list (e.g. no Anthropic credential to forward,
+            # or an offline blip). We still serve stock + custom below, so real
+            # Claude and your models stay visible instead of vanishing.
+            vlog("/v1/models upstream fetch failed, serving stock+custom only: %s" % e)
         data = base.get("data")
         if not isinstance(data, list):
             data = []
             base["data"] = data
         existing = {m.get("id") for m in data if isinstance(m, dict)}
-        for m in UC_MODELS:
+        # Stock first (so real Claude is always present), then your config. Your
+        # config wins over a stock entry of the same id; both yield to whatever
+        # the upstream list already returned for that id.
+        for m in stock + UC_MODELS:
             if m["id"] not in existing:
                 data.append(dict(m))
+                existing.add(m["id"])
         self._raw(200, "application/json", json.dumps(base).encode("utf-8"))
         return True
 
@@ -1834,6 +1925,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     global UC_SLOT_MAP, UC_MODELS, LISTEN_PORT, UPSTREAM, MAX_TOKENS_FLOOR, ROUTER
+    global INCLUDE_STOCK_MODELS
     cfg_path = os.environ.get("UC_CONFIG", "") or _default_config_path()
     try:
         cfg = load_config(cfg_path)
@@ -1853,16 +1945,24 @@ def main():
         UPSTREAM = str(proxy_cfg["anthropic_upstream"]).rstrip("/")
     if "UC_MAX_TOKENS" not in os.environ and proxy_cfg.get("max_tokens_floor"):
         MAX_TOKENS_FLOOR = int(proxy_cfg["max_tokens_floor"])
+    # proxy.include_stock_models in config.json is honored unless the env var
+    # was set explicitly (env always wins).
+    if "UC_INCLUDE_STOCK_MODELS" not in os.environ and "include_stock_models" in proxy_cfg:
+        INCLUDE_STOCK_MODELS = bool(proxy_cfg["include_stock_models"])
 
     UC_SLOT_MAP = _routes_to_slots(cfg.get("routes"))
     UC_MODELS = _models_from_config(cfg.get("models"))
     _configure_router(cfg.get("router"))
     _wire_orchestrator_worker()
+    stock = _stock_models()
+    if stock:
+        log("  including %d stock Claude model(s) on GET /v1/models (real Claude "
+            "stays visible): %s" % (len(stock), ", ".join(m["id"] for m in stock)))
     if UC_MODELS:
-        log("  advertising %d model(s) on GET /v1/models:" % len(UC_MODELS))
+        log("  advertising %d configured model(s) on GET /v1/models:" % len(UC_MODELS))
         for m in UC_MODELS:
             log("    %s  (%s)" % (m["id"], m["display_name"]))
-    else:
+    elif not stock:
         log("  no models configured (GET /v1/models passes through unchanged)")
     for mid, slot in UC_SLOT_MAP.items():
         log("  route %s -> type=%s model=%s upstream=%s"

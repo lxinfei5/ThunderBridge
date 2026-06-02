@@ -180,34 +180,56 @@ Tested on **Windows 11** (no WSL needed). macOS/Linux/WSL work too via `bin/ultr
   <img src="assets/brand/quickstart.png" alt="Three steps: get the code and run the doctor, copy config.example.json and pick your models, then launch and type /model" width="100%">
 </p>
 
-### Windows
-
-```powershell
-git clone https://github.com/OnlyTerp/UltraCode-Shim.git
-cd UltraCode-Shim
-
-# 1. Sanity-check your machine and config (safe to run anytime)
-python scripts\doctor.py
-
-# 2. Tell it which models you want (see "Configure your models" below)
-#    Copy config.example.json to config.json, keep the models you have,
-#    and put your keys in it (config.json is gitignored).
-copy config.example.json config.json
-
-# 3. Create Desktop icons (one for UltraCode, one for normal Claude Code)
-.\windows\Install-DesktopIcons.ps1
-
-# 4. Double-click "UltraCode (All Models)" — pick orchestrator + worker in the selector.
-#    You can still type /model later to change either tier.
-```
+**One command** gets the code, runs the offline self-test, creates your
+`config.json`, and installs a `ultracode` launcher on your PATH. Then you edit
+one file and run `ultracode`.
 
 ### macOS / Linux / WSL
 
-Run `python3 scripts/doctor.py` then `./bin/ultracode`. The launcher starts the
-proxy, opens the two-column orchestrator/worker selector, then launches Claude
-Code. Set `UC_SELECTOR=0` to skip the selector and use `/model` only.
-(The launchers copy `config.example.json` → `config.json` for you on first run if
-you skip step 2.)
+```bash
+curl -fsSL https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.ps1 | iex
+```
+
+Already cloned the repo? Just run `./install.sh` (or `.\install.ps1`) from inside
+it — same result, no network clone.
+
+Then:
+
+1. **Pick your models** — edit `config.json` (created for you): keep the backends
+   you have a key/plan for, delete the rest, drop your keys in. See
+   [Configure your models](#configure-your-models).
+2. **Run it** — `ultracode`. The launcher starts the proxy, opens the two-column
+   orchestrator/worker selector, then launches Claude Code. Type `/model` anytime
+   to change either tier. (`UC_SELECTOR=0` skips the selector and uses `/model`
+   only.)
+
+> **Prefer Desktop icons on Windows?** Run `.\install.ps1 -DesktopIcons` (or, in a
+> clone, `.\windows\Install-DesktopIcons.ps1`) to get **"UltraCode (All Models)"**
+> and **"Claude Code (Normal)"** shortcuts. Uninstall the launcher anytime with
+> `./install.sh --uninstall` (or `.\install.ps1 -Uninstall`).
+
+<details>
+<summary>Manual install (no install script)</summary>
+
+```bash
+git clone https://github.com/OnlyTerp/UltraCode-Shim.git
+cd UltraCode-Shim
+python3 scripts/doctor.py                 # sanity-check + offline self-test
+cp config.example.json config.json        # then edit it (gitignored)
+./bin/ultracode                           # mac/linux/WSL
+#   windows: .\windows\Start-UltraCode.ps1   (or .\windows\Install-DesktopIcons.ps1)
+```
+
+The launchers copy `config.example.json` → `config.json` for you on first run if
+you skip that step.
+
+</details>
 
 ## Configure your models
 
@@ -218,6 +240,13 @@ It has two sections you edit:
   `claude` or `anthropic`** (Claude Code filters the rest out).
 - **`routes`** — where each of those ids actually goes. The route key must match
   the model `id`.
+
+> **Real Claude (Opus / Sonnet / Haiku) is always in the picker.** You don't list
+> it in `config.json` — the proxy adds the stock Claude models to `/model`
+> automatically and *keeps them there even when there's no Anthropic key to fetch
+> the list*, so Opus never silently disappears. Picking one routes straight to
+> real Claude with the UltraCode envelope. Don't want them? Set
+> `proxy.include_stock_models: false` (or `UC_INCLUDE_STOCK_MODELS=0`).
 
 Example — MiMo and an OpenRouter model:
 
@@ -269,9 +298,10 @@ Full walkthrough: [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).
 
 Yes. The UltraCode launcher only sets environment variables **for the launched
 process** and uses a session-scoped `--settings` file. It never edits your global
-Claude config or credentials. The installer also gives you a **"Claude Code (Normal)"**
-icon, so you can always start the plain version. Remove everything with
-`windows\Uninstall.ps1`.
+Claude config or credentials. On Windows the `-DesktopIcons` install also gives
+you a **"Claude Code (Normal)"** icon, so you can always start the plain version.
+Remove the launcher with `./install.sh --uninstall` (or `.\install.ps1
+-Uninstall`); remove Windows icons + session state with `windows\Uninstall.ps1`.
 
 ## Telling your AI assistant to set this up
 

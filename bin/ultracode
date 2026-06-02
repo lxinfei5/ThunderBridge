@@ -8,7 +8,16 @@
 # (session-scoped --settings + env only).
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve this script through any symlinks (the install script may symlink this
+# launcher onto your PATH, e.g. ~/.local/bin/ultracode) so REPO always points at
+# the real repo checkout, not the symlink's directory. Pure POSIX; no readlink -f.
+SELF="${BASH_SOURCE[0]}"
+while [ -h "$SELF" ]; do
+  DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="$DIR/$SELF" ;; esac
+done
+REPO="$(cd -P "$(dirname "$SELF")/.." && pwd)"
 PROXY="$REPO/proxy.py"
 CONFIG="$REPO/config.json"
 CONFIG_EXAMPLE="$REPO/config.example.json"
@@ -110,19 +119,24 @@ trap stop_proxy EXIT
 
 start_proxy
 
-# Seed Claude Code's gateway-models cache from the live proxy so synthesized
-# Worker -> entries show on first /model open too.
+# Seed Claude Code's gateway-models cache from the live proxy so the stock Claude
+# models, your configured models, and the synthesized Worker -> entries all show
+# on the very first /model open (before Claude Code re-fetches /v1/models).
 CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 "$PY" - "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
 import json,os,sys,time,urllib.request
 cache_f, base = sys.argv[1], sys.argv[2]
 os.makedirs(os.path.dirname(cache_f), exist_ok=True)
 models=[]
+seen=set()
 with urllib.request.urlopen(base.rstrip('/')+'/healthz',timeout=2) as r:
     health=json.loads(r.read().decode('utf-8'))
-for m in health.get('custom_models') or []:
-    if isinstance(m,dict) and m.get('id'):
-        models.append({'id':m['id'],'display_name':m.get('display_name',m['id'])})
+# Stock Claude first so real Claude is always present, then your configured models.
+for key in ('stock_models','custom_models'):
+    for m in health.get(key) or []:
+        if isinstance(m,dict) and m.get('id') and m['id'] not in seen:
+            seen.add(m['id'])
+            models.append({'id':m['id'],'display_name':m.get('display_name',m['id'])})
 json.dump({'baseUrl':base,'fetchedAt':int(time.time()*1000),'models':models}, open(cache_f,'w'))
 PY
 
