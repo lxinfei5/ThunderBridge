@@ -179,6 +179,31 @@ plan/key for and delete the rest:
 | Llama 3.3 70B (OpenRouter) | `claude-openrouter` | `openai_compat` | OpenRouter |
 | Local model | `claude-local` | `openai_compat` | local server |
 | Composer 2.5 (experimental) | `claude-composer` | `cursor_agent` | cursor-agent |
+| Auto (smart routing) | `claude-auto` | `auto` | picks among your backends per task |
+
+## Make a model a candidate for the Auto Router
+
+Adding a model to the `/model` menu (above) is independent of the
+[Auto Router](AUTO_ROUTER.md). To let the router *choose* a model automatically,
+also list it under `router.candidates` with a relative `cost`, an
+`supports_images` flag, and an honest capability `card`:
+
+```jsonc
+"router": {
+  "enabled": true,
+  "classifier": "claude-mimo",
+  "candidates": [
+    { "id": "claude-minimax-m3", "cost": 0.3, "supports_images": false,
+      "card": "cheap, fast; single-file edits, codegen, simple refactors; weak on big refactors/debugging" },
+    { "id": "claude-mimo",       "cost": 1.0, "supports_images": false,
+      "card": "cheap generalist; standard infra/CRUD, data processing, moderate multi-file edits" }
+  ]
+}
+```
+
+The candidate `id` must match a route. Candidates without a route are skipped, so
+the router keeps working with whatever subset you keep. Full reference:
+[AUTO_ROUTER.md](AUTO_ROUTER.md).
 
 After editing, validate and launch:
 

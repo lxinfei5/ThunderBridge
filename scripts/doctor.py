@@ -166,6 +166,52 @@ def main():
                  % (name, auth)) if using_example else \
                 fail("route '%s': auth still has a placeholder - replace it with your real key" % name)
 
+    # 6.5 Auto Router validation (optional feature)
+    router = cfg.get("router") if isinstance(cfg.get("router"), dict) else {}
+    if router and router.get("enabled"):
+        rid = router.get("id") or "claude-auto"
+        rslot = routes.get(rid) if isinstance(routes.get(rid), dict) else None
+        if rslot and rslot.get("type") == "auto" and rid in model_ids:
+            ok("router: picker '%s' is a model + type:auto route" % rid)
+        else:
+            (note if using_example else fail)(
+                "router: '%s' must appear in 'models' and have a {\"type\":\"auto\"} route" % rid)
+
+        thr = router.get("threshold", 0.7)
+        if isinstance(thr, (int, float)) and 0 < float(thr) <= 1:
+            ok("router: threshold %.2f" % float(thr))
+        else:
+            fail("router: threshold must be a number in (0, 1]; got %r" % thr)
+
+        cands = router.get("candidates") if isinstance(router.get("candidates"), list) else []
+        avail = 0
+        for c in cands:
+            if not isinstance(c, dict) or not c.get("id"):
+                fail("router: each candidate needs an 'id'")
+                continue
+            cid = c["id"]
+            if cid not in routes:
+                (note if using_example else fail)(
+                    "router: candidate '%s' has no matching route (it will be skipped)" % cid)
+            else:
+                avail += 1
+            if "cost" in c and not isinstance(c["cost"], (int, float)):
+                fail("router: candidate '%s' cost must be a number" % cid)
+        if avail >= 1:
+            ok("router: %d candidate backend(s) available" % avail)
+        else:
+            (note if using_example else fail)(
+                "router: no candidate has a configured route - add at least one")
+
+        clf = router.get("classifier")
+        if clf and clf in routes:
+            ok("router: classifier '%s' is configured" % clf)
+        elif clf:
+            note("router: classifier '%s' not configured - router will fall back to the "
+                 "cheapest candidate deterministically (no scoring)" % clf)
+        else:
+            note("router: no classifier set - router will pick the cheapest candidate without scoring")
+
     # 7. port free
     proxy_cfg = cfg.get("proxy") if isinstance(cfg.get("proxy"), dict) else {}
     port = int(os.environ.get("UC_LISTEN_PORT") or proxy_cfg.get("listen_port") or 8141)

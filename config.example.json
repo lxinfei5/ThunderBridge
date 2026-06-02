@@ -11,8 +11,9 @@
     "max_tokens_floor": 64000
   },
 
-  "_models": "What shows in Claude Code's /model picker. id MUST start with 'claude' or 'anthropic' (others are silently dropped). display_name is the label you see.",
+  "_models": "What shows in Claude Code's /model picker. id MUST start with 'claude' or 'anthropic' (others are silently dropped). display_name is the label you see. 'claude-auto' is the Auto Router (see the 'router' section below): pick it and the proxy chooses the cheapest configured backend that can handle each task.",
   "models": [
+    { "id": "claude-auto",              "display_name": "Auto (smart routing)" },
     { "id": "claude-gpt-5.5-codex",     "display_name": "GPT-5.5 (Codex OAuth)" },
     { "id": "claude-minimax-m3",        "display_name": "MiniMax-M3" },
     { "id": "claude-mimo",              "display_name": "MiMo v2.5 Pro" },
@@ -28,6 +29,10 @@
 
   "_routes": "Where each model id above goes. The key MUST match an id in 'models'. Put your API key right here (config.json is gitignored) or use ${ENV_VAR} and set it in your environment. type: omit/'anthropic' = passthrough to Anthropic; 'openai_compat' = any OpenAI Chat Completions backend (with tool-calling); 'codex_oauth' = GPT-5.5 via `codex login`; 'cursor_agent' = Cursor Composer via the cursor-agent CLI (experimental). For openai_compat, 'upstream' is the base URL exactly as the provider documents it (usually ends in /v1) - the proxy appends /chat/completions. Optional: 'headers' {}, 'max_output_tokens' (default 8192).",
   "routes": {
+    "claude-auto": {
+      "_": "The Auto Router. type:auto means this is NOT a real backend - the proxy asks the cheap 'classifier' model (configured in the 'router' block below) to score the candidates and routes each task to the cheapest one that clears the quality bar. Pick 'Auto (smart routing)' in /model or the selector.",
+      "type": "auto"
+    },
     "claude-gpt-5.5-codex": {
       "_": "Needs `codex login` once; no API key. effort/tier via UC_CODEX_EFFORT/UC_CODEX_SERVICE_TIER.",
       "type": "codex_oauth",
@@ -100,5 +105,47 @@
       "type": "cursor_agent",
       "model": "composer-2.5"
     }
+  },
+
+  "_router": "The Auto Router (optional). When enabled, picking 'claude-auto' makes the proxy send a tiny scoring request to the 'classifier' model, which rates each candidate 0-1 on how likely it is to nail THIS task; the proxy then routes the real request to the CHEAPEST candidate that clears 'threshold'. Trivial turns -> cheap model, hard turns -> your strongest one, automatically. Candidate ids must be routes above; any you delete are skipped, so this keeps working with whatever subset you keep. The classifier scores on capability only (it never sees cost), and decisions are cached per task. Full guide: docs/AUTO_ROUTER.md.",
+  "router": {
+    "enabled": true,
+    "_id": "Picker id that triggers routing. Must also exist in 'models' + 'routes' (as type:auto). Default claude-auto.",
+    "id": "claude-auto",
+    "_classifier": "A route id (from 'routes' above) used as the cheap, fast scorer. Use the cheapest fast model you kept. If it's missing/unavailable the router falls back to the cheapest candidate deterministically.",
+    "classifier": "claude-mimo",
+    "_threshold": "0..1 success-probability bar. The cheapest candidate scoring >= this wins. Lower = more aggressive cost savings; higher = escalate to strong models sooner. 0.7 is a good default.",
+    "threshold": 0.7,
+    "_default": "Candidate id used when the classifier can't run at all (e.g. it's offline). Defaults to the cheapest candidate.",
+    "default": "claude-mimo",
+    "_cache": "Reuse one classification across a task's tool-call round-trips (recommended; avoids re-scoring every request).",
+    "cache": true,
+    "_candidates": "The backends the router chooses among. id = a route above. cost = a RELATIVE price weight (any unit; only the ordering matters for the cheapest-among-viable tie-break). supports_images = can it accept images (image tasks skip models that can't). card = a short capability description the classifier reads to score it - be honest about strengths/weaknesses; this is what makes routing smart.",
+    "candidates": [
+      {
+        "id": "claude-minimax-m3",
+        "cost": 0.3,
+        "supports_images": false,
+        "card": "Very cheap and fast, ~1M context. Strong on well-scoped single-file edits, boilerplate, codegen from a clear spec, simple refactors, log/CSV data wrangling, and short Q&A. Weak on large multi-file refactors, subtle multi-step debugging, niche toolchains, and tasks needing deep domain knowledge."
+      },
+      {
+        "id": "claude-mimo",
+        "cost": 1.0,
+        "supports_images": false,
+        "card": "Cheap, capable generalist coder. Good for standard servers/CRUD/infra, data processing, conventional multi-file edits of moderate size, code migrations, and tool-use/test loops. Less reliable on hard algorithmic reasoning, exotic build systems, or long autonomous debugging."
+      },
+      {
+        "id": "claude-deepseek-v4-pro",
+        "cost": 2.0,
+        "supports_images": false,
+        "card": "Mid-cost, strong reasoning model. Good for harder multi-step logic, algorithm implementation, and careful refactors that need sustained reasoning. Reliable tool-calling. Not vision-capable."
+      },
+      {
+        "id": "claude-gpt-5.5-codex",
+        "cost": 5.0,
+        "supports_images": true,
+        "card": "Highest cost here; frontier reasoning and agentic coding. Best for the hardest work: large multi-file refactors, subtle debugging, architecture and design, long autonomous/dynamic workflows, and anything requiring images. Reserve for tasks the cheaper models would likely fail."
+      }
+    ]
   }
 }

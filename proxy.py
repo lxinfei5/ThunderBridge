@@ -60,7 +60,11 @@ ROUTE SHAPE (config.json "routes" object)
     "claude-gpt-5.5":    {"type": "codex_oauth", "model": "gpt-5.5"}
   }
 
-  type     omit for Anthropic passthrough; "openai_compat"; or "codex_oauth"
+  type     omit for Anthropic passthrough; "openai_compat"; "codex_oauth"; or
+           "auto" (the Auto Router -- a cheap classifier model scores the other
+           backends per task and routes to the cheapest one that clears a
+           quality bar; see the "router" section in config.json and
+           docs/AUTO_ROUTER.md)
   model    backend model id sent upstream
   upstream backend base URL. openai_compat: the OpenAI base URL from the
            provider's docs (usually ends in /v1); the proxy appends
@@ -100,6 +104,12 @@ FORCE_THINKING = os.environ.get("UC_FORCE_THINKING", "1") == "1"
 INJECT_REMINDER = os.environ.get("UC_INJECT_REMINDER", "1") == "1"
 VERBOSE = os.environ.get("UC_VERBOSE", "0") == "1"
 _LOG_PATH = os.environ.get("UC_LOG", "")
+
+# Auto Router knobs (see the "router" section in config.json + docs/AUTO_ROUTER.md).
+ROUTER_ENABLED_ENV = os.environ.get("UC_ROUTER", "1") != "0"
+ROUTER_TIMEOUT = float(os.environ.get("UC_ROUTER_TIMEOUT", "12"))
+ROUTER_MAX_TOKENS = int(os.environ.get("UC_ROUTER_MAX_TOKENS", "600"))
+ROUTER_LOG = os.environ.get("UC_ROUTER_LOG", "0") == "1"
 
 try:
     UC_MODEL_MAP = json.loads(os.environ.get("UC_MODEL_MAP", "") or "{}")
@@ -253,6 +263,17 @@ def vlog(msg: str) -> None:
 DEFAULT_UPSTREAM = UPSTREAM
 UC_SLOT_MAP = {}   # populated in main()
 UC_MODELS = []     # populated in main()
+
+# Auto Router state (populated in main() from config.json "router").
+ROUTER = {
+    "enabled": False,
+    "id": "claude-auto",      # the picker id that triggers smart routing
+    "classifier": None,       # route id of the cheap model that scores candidates
+    "threshold": 0.7,         # success-probability bar; cheapest candidate >= this wins
+    "candidates": [],         # [{"id","cost","card","supports_images"}]
+    "default": None,          # fallback candidate id when classification can't run
+    "cache": True,            # reuse the decision across a task's tool-call round-trips
+}
 
 
 # --------------------------------------------------------------------------
@@ -431,8 +452,25 @@ def transform_messages_body(raw: bytes):
         remap = ("%s->%s" % (model_before, routed_id)) if routed_id != model_before else (model_before or "-")
         log("tier=%s model=%s" % (tier, remap))
 
+    # Auto Router: a slot of type "auto" is not a real backend -- it asks a cheap
+    # classifier model to score the configured candidates and routes this request
+    # to the cheapest one that clears the quality bar. Resolve it to a concrete
+    # candidate id, then fall through to that candidate's slot below.
     slot = UC_SLOT_MAP.get(body.get("model"))
-    if isinstance(slot, dict):
+    if isinstance(slot, dict) and slot.get("type") == "auto":
+        picked = resolve_auto(body, tier) if _router_is_enabled() else None
+        if not picked:
+            # Router off or unresolvable -> deterministic fallback so we never try
+            # to dispatch the synthetic "auto" id at a real backend.
+            picked = _router_fallback_id(_router_available_candidates())
+        if picked and picked != body.get("model"):
+            if TIER_LOG or ROUTER_LOG:
+                log("router tier=%s %s -> %s" % (tier, body.get("model"), picked))
+            body["model"] = picked
+            changed = True
+        slot = UC_SLOT_MAP.get(body.get("model"))
+
+    if isinstance(slot, dict) and slot.get("type") != "auto":
         target_model = slot.get("model")
         if target_model and target_model != body.get("model"):
             body["model"] = target_model
@@ -884,6 +922,396 @@ def _events_with_retry(make_events, attempts=EMPTY_RETRY_ATTEMPTS,
 
 
 # --------------------------------------------------------------------------
+# Auto Router -- pick the right backend for each task, automatically
+# --------------------------------------------------------------------------
+# A "claude-auto" picker entry routes through a small, cheap *classifier* model
+# (one of your configured backends) that scores every candidate backend on how
+# likely it is to nail THIS task on the first try (0.0-1.0). The proxy then sends
+# the real request to the CHEAPEST candidate whose score clears a quality bar
+# (default 0.7) -- so trivial turns go to a cheap model and hard turns escalate
+# to your strongest one, automatically. Same "classifier picks the model" idea
+# popularized by tools like Factory Droid's router, built on the models you
+# already pay for.
+#
+# Design notes:
+#   * The classifier scores on CAPABILITY only; it never sees price. Cost is
+#     applied afterward by the selector's cheapest-among-viable tie-break, so the
+#     classifier can't be biased toward expensive models.
+#   * Every decision is cached per task (keyed by the user's message) so a task's
+#     follow-up tool-call round-trips reuse one classification instead of paying
+#     the classifier tax on every request.
+#   * Every decision is logged (UC_ROUTER_LOG=1) -- the cheap, honest way to learn
+#     whether routing is actually helping, which a feedback loop would later use.
+#   * It degrades safely at every step: unknown candidate ids are dropped, a
+#     missing/again classifier falls back to the cheapest candidate deterministically,
+#     and any error falls back to the configured default. The request never breaks.
+
+_ROUTER_CACHE = {}          # key -> candidate id
+_ROUTER_CACHE_LOCK = threading.Lock()
+_ROUTER_CACHE_MAX = 256
+
+
+def _router_is_enabled():
+    return bool(ROUTER.get("enabled")) and ROUTER_ENABLED_ENV
+
+
+def _router_available_candidates():
+    """Candidates whose backend is actually configured (route among available
+    models only). Keeps routing working even if the user deleted some examples."""
+    out = []
+    for c in ROUTER.get("candidates") or []:
+        cid = c.get("id")
+        if cid and cid in UC_SLOT_MAP and UC_SLOT_MAP[cid].get("type") != "auto":
+            out.append(c)
+    return out
+
+
+def _clamp01(x):
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if x < 0 else (1.0 if x > 1 else x)
+
+
+def _last_user_text(anth_body):
+    """Sanitized text of the latest user turn -- the task to classify."""
+    msgs = anth_body.get("messages") or []
+    for m in reversed(msgs):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        # A user turn that is ONLY tool_result blocks is a tool round-trip, not a
+        # fresh ask; skip it so the cache key stays on the real instruction.
+        if isinstance(content, list):
+            non_tool = [b for b in content
+                        if not (isinstance(b, dict) and b.get("type") == "tool_result")]
+            if not non_tool:
+                continue
+            txt = _text_from_anthropic_content(non_tool)
+        else:
+            txt = content if isinstance(content, str) else _text_from_anthropic_content(content)
+        txt = (txt or "").strip()
+        if txt:
+            return txt
+    return ""
+
+
+def _has_images(anth_body):
+    for m in anth_body.get("messages") or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "image":
+                    return True
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    inner = b.get("content")
+                    if isinstance(inner, list):
+                        for ib in inner:
+                            if isinstance(ib, dict) and ib.get("type") == "image":
+                                return True
+    return False
+
+
+def _router_signal(anth_body, tier):
+    """The compact task description handed to the classifier."""
+    msgs = anth_body.get("messages") or []
+    user_turns = sum(1 for m in msgs if isinstance(m, dict) and m.get("role") == "user")
+    tool_names = []
+    for t in anth_body.get("tools") or []:
+        if isinstance(t, dict) and t.get("name"):
+            tool_names.append(t["name"])
+    return {
+        "task": _last_user_text(anth_body),
+        "surface": "orchestrator" if tier == "heavy" else "worker/sub-agent",
+        "has_images": _has_images(anth_body),
+        "turns": user_turns,
+        "tool_count": len(tool_names),
+    }
+
+
+def _router_system_prompt(candidates):
+    """Build the classifier instructions + capability cards + output schema."""
+    lines = [
+        "You are a task-routing classifier for an AI coding agent.",
+        "You are given a <session> describing the user's current task and a list",
+        "of candidate models. For EACH candidate, output a score from 0.0 to 1.0:",
+        "the probability that the model completes THIS task correctly on its first",
+        "attempt, without errors or rework.",
+        "",
+        "You are NOT choosing a winner. A downstream system combines your scores",
+        "with cost data you do not see to make the final pick. Be an accurate,",
+        "well-calibrated, independent probability estimator for each model.",
+        "",
+        "Scoring guide:",
+        "  0.0       cannot attempt (e.g. images required but unsupported) -- exact 0.0",
+        "  0.1-0.3   will almost certainly fail; lacks the capability",
+        "  0.4-0.6   real chance of failure; touches a known weakness or is uncertain",
+        "  0.7-0.8   likely success; handles this category well",
+        "  0.9-1.0   near-certain success; well within demonstrated ability",
+        "Use the full range. A short prompt is NOT necessarily an easy task -- hidden",
+        "complexity (multi-file edits, debugging, niche domains, strict correctness)",
+        "should pull scores down for weaker models. Default to ~0.5-0.6 when unsure.",
+        "",
+        "Candidate models:",
+    ]
+    for c in candidates:
+        card = (c.get("card") or "").strip() or "General-purpose model. No capability card provided."
+        imgs = "yes" if c.get("supports_images") else "no"
+        lines.append("- id: %s" % c["id"])
+        lines.append("  images: %s" % imgs)
+        lines.append("  capability: %s" % card)
+    schema = {"scores": {c["id"]: 0.0 for c in candidates},
+              "reasoning": "one short sentence"}
+    lines += [
+        "",
+        "Respond with ONE JSON object, no prose, no code fence, exactly this shape:",
+        json.dumps(schema, ensure_ascii=False),
+        "Every candidate id above MUST appear in \"scores\". Each value in [0.0, 1.0].",
+    ]
+    return "\n".join(lines)
+
+
+def _router_user_content(signal, candidates):
+    task = signal["task"] or "(no explicit instruction; infer from context)"
+    if len(task) > 6000:               # head+tail, keep it cheap
+        task = task[:3000] + "\n...\n" + task[-3000:]
+    return "\n".join([
+        "<session>",
+        "  surface: %s" % signal["surface"],
+        "  images_present: %s" % ("yes" if signal["has_images"] else "no"),
+        "  user_turns: %d" % signal["turns"],
+        "  tools_available: %d" % signal["tool_count"],
+        "  current_task: |",
+        "\n".join("    " + ln for ln in task.splitlines()) or "    (empty)",
+        "</session>",
+        "",
+        "Score these candidate ids: %s" % ", ".join(c["id"] for c in candidates),
+    ])
+
+
+def _classifier_complete(slot, system_prompt, user_content, timeout):
+    """Single, non-streaming completion against the classifier backend. Returns
+    the response text (possibly with surrounding prose) or raises."""
+    stype = slot.get("type")
+    if stype == "codex_oauth":
+        if _codex_oauth is None:
+            raise RuntimeError("codex_oauth classifier needs providers/codex_oauth.py")
+        text = []
+        for ev in _codex_oauth.stream_events(
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_content}],
+            tools=None, tool_choice=None, model=slot.get("model") or "gpt-5.5"):
+            if ev.get("type") == "text_delta":
+                text.append(ev.get("text") or "")
+            elif ev.get("type") == "error":
+                raise RuntimeError(ev.get("message") or "codex classifier error")
+        return "".join(text)
+
+    if stype == "openai_compat":
+        url = (slot.get("upstream") or UPSTREAM).rstrip("/") + "/chat/completions"
+        payload = {
+            "model": slot.get("model"),
+            "stream": False,
+            "temperature": 0,
+            "max_tokens": ROUTER_MAX_TOKENS,
+            "messages": [{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user_content}],
+        }
+        sbody = slot.get("body")
+        if isinstance(sbody, dict):
+            for bk, bv in sbody.items():
+                payload[bk] = _expand_env(bv) if isinstance(bv, str) else bv
+        data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "Content-Length": str(len(data))}
+        auth = slot.get("auth")
+        if auth and auth != "passthrough":
+            Handler._apply_auth_header(headers, auth)
+        else:
+            headers["Authorization"] = "Bearer unused"
+        for hk, hv in (slot.get("headers") or {}).items():
+            headers[hk] = hv
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        obj = json.loads(resp.read().decode("utf-8"))
+        msg = ((obj.get("choices") or [{}])[0].get("message") or {})
+        return msg.get("content") or ""
+
+    # Anthropic passthrough (real Claude or any Anthropic-compatible endpoint).
+    url = (slot.get("upstream") or UPSTREAM).rstrip("/") + "/v1/messages"
+    payload = {"model": slot.get("model"), "max_tokens": ROUTER_MAX_TOKENS,
+               "system": system_prompt,
+               "messages": [{"role": "user", "content": user_content}]}
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Content-Length": str(len(data)),
+               "anthropic-version": "2023-06-01"}
+    auth = slot.get("auth")
+    if auth and auth != "passthrough":
+        Handler._apply_auth_header(headers, auth)
+    for hk, hv in (slot.get("headers") or {}).items():
+        headers[hk] = hv
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    obj = json.loads(resp.read().decode("utf-8"))
+    return _text_from_anthropic_content(obj.get("content"))
+
+
+def _parse_scores(text, candidate_ids):
+    """Pull the {"scores": {...}} object out of the classifier's reply."""
+    if not text:
+        return {}
+    s, e = text.find("{"), text.rfind("}")
+    if s == -1 or e == -1 or e <= s:
+        return {}
+    for end in (e, text.find("}", s)):       # try greedy then first object
+        if end == -1 or end <= s:
+            continue
+        try:
+            obj = json.loads(text[s:end + 1])
+        except Exception:
+            continue
+        scores = obj.get("scores") if isinstance(obj, dict) else None
+        if isinstance(scores, dict):
+            return {cid: _clamp01(scores.get(cid, 0)) for cid in candidate_ids}
+    return {}
+
+
+def _router_pick(scores, candidates, threshold, has_images):
+    """Cheapest candidate whose score clears the bar; image-incapable models are
+    hard-zeroed when the task has images; if none clear the bar, take the best."""
+    scored = []
+    for c in candidates:
+        sc = scores.get(c["id"], 0.0)
+        if has_images and not c.get("supports_images"):
+            sc = 0.0
+        scored.append((c, sc))
+    viable = [(c, sc) for (c, sc) in scored if sc >= threshold]
+    if viable:
+        winner = min(viable, key=lambda cs: (float(cs[0].get("cost", 0) or 0), -cs[1]))
+        return winner[0]["id"], winner[1], "score>=%.2f, cheapest" % threshold
+    best = max(scored, key=lambda cs: cs[1], default=None)
+    if best and best[1] > 0:
+        return best[0]["id"], best[1], "below bar; highest score"
+    return None, 0.0, "no usable score"
+
+
+def _router_cache_key(signal, tier):
+    return "%s|%s" % (tier, hash(signal["task"]))
+
+
+def _router_fallback_id(candidates):
+    """Deterministic, classifier-free choice: configured default, else cheapest."""
+    cfg_default = ROUTER.get("default")
+    if cfg_default and any(c["id"] == cfg_default for c in candidates):
+        return cfg_default
+    if candidates:
+        return min(candidates, key=lambda c: float(c.get("cost", 0) or 0))["id"]
+    return None
+
+
+def _configure_router(router_cfg):
+    """Populate ROUTER from config.json's "router" block, and make sure the
+    picker model id + its synthetic {"type":"auto"} route exist so it shows up in
+    /model, /v1/models, and the pre-launch selector. Idempotent."""
+    if not isinstance(router_cfg, dict):
+        return
+    rid = router_cfg.get("id") or "claude-auto"
+    cands = []
+    for c in router_cfg.get("candidates") or []:
+        if not isinstance(c, dict) or not c.get("id"):
+            continue
+        cands.append({
+            "id": c["id"],
+            "cost": float(c.get("cost", 1) or 0),
+            "card": c.get("card") or "",
+            "supports_images": bool(c.get("supports_images", False)),
+        })
+    ROUTER.update({
+        "enabled": bool(router_cfg.get("enabled", False)),
+        "id": rid,
+        "classifier": router_cfg.get("classifier"),
+        "threshold": float(router_cfg.get("threshold", 0.7) or 0.7),
+        "candidates": cands,
+        "default": router_cfg.get("default"),
+        "cache": bool(router_cfg.get("cache", True)),
+    })
+    if not ROUTER["enabled"]:
+        return
+    if not isinstance(UC_SLOT_MAP.get(rid), dict):
+        UC_SLOT_MAP[rid] = {"type": "auto"}
+    else:
+        UC_SLOT_MAP[rid]["type"] = "auto"
+    if not any(m.get("id") == rid for m in UC_MODELS):
+        UC_MODELS.insert(0, {
+            "type": "model", "id": rid,
+            "display_name": router_cfg.get("display_name") or "Auto (smart routing)",
+            "created_at": "2025-01-01T00:00:00Z",
+        })
+
+
+def resolve_auto(anth_body, tier):
+    """Return the concrete candidate model id the Auto Router selects for this
+    request, or None to leave routing unchanged. Never raises."""
+    try:
+        candidates = _router_available_candidates()
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]["id"]
+
+        signal = _router_signal(anth_body, tier)
+        has_images = signal["has_images"]
+        key = _router_cache_key(signal, tier)
+        if ROUTER.get("cache"):
+            with _ROUTER_CACHE_LOCK:
+                cached = _ROUTER_CACHE.get(key)
+            if cached and any(c["id"] == cached for c in candidates):
+                if ROUTER_LOG:
+                    log("[router] tier=%s cache-hit -> %s" % (tier, cached))
+                return cached
+
+        classifier_id = ROUTER.get("classifier")
+        classifier_slot = UC_SLOT_MAP.get(classifier_id) if classifier_id else None
+        if not isinstance(classifier_slot, dict) or classifier_slot.get("type") == "auto":
+            pick = _router_fallback_id(candidates)
+            if ROUTER_LOG:
+                log("[router] tier=%s no classifier -> deterministic %s" % (tier, pick))
+            return pick
+
+        system_prompt = _router_system_prompt(candidates)
+        user_content = _router_user_content(signal, candidates)
+        try:
+            raw = _classifier_complete(classifier_slot, system_prompt, user_content,
+                                       ROUTER_TIMEOUT)
+        except Exception as e:
+            pick = _router_fallback_id(candidates)
+            log("[router] classifier failed (%s); falling back to %s" % (e, pick))
+            return pick
+
+        scores = _parse_scores(raw, [c["id"] for c in candidates])
+        threshold = float(ROUTER.get("threshold", 0.7))
+        pick, score, why = _router_pick(scores, candidates, threshold, has_images)
+        if not pick:
+            pick = _router_fallback_id(candidates)
+            why = "empty scores; fallback"
+            score = 0.0
+        if ROUTER.get("cache") and pick:
+            with _ROUTER_CACHE_LOCK:
+                if len(_ROUTER_CACHE) >= _ROUTER_CACHE_MAX:
+                    _ROUTER_CACHE.clear()
+                _ROUTER_CACHE[key] = pick
+        if ROUTER_LOG or VERBOSE:
+            log("[router] tier=%s -> %s (score=%.2f; %s) scores=%s"
+                % (tier, pick, score, why,
+                   json.dumps({c["id"]: round(scores.get(c["id"], 0.0), 2) for c in candidates})))
+        return pick
+    except Exception as e:
+        vlog("[router] resolve_auto unexpected error: %s" % e)
+        return None
+
+
+# --------------------------------------------------------------------------
 # HTTP proxy
 # --------------------------------------------------------------------------
 
@@ -912,6 +1340,14 @@ class Handler(BaseHTTPRequestHandler):
                 "max_tokens_floor": MAX_TOKENS_FLOOR,
                 "inject_reminder": INJECT_REMINDER,
                 "codex_helper": _codex_oauth is not None,
+                "router": {
+                    "enabled": _router_is_enabled(),
+                    "id": ROUTER.get("id"),
+                    "classifier": ROUTER.get("classifier"),
+                    "threshold": ROUTER.get("threshold"),
+                    "candidates": [{"id": c["id"], "cost": c.get("cost")}
+                                   for c in _router_available_candidates()],
+                },
                 "custom_models": [{"id": m["id"], "display_name": m["display_name"]}
                                   for m in UC_MODELS],
                 "slots": {k: {"type": v.get("type", "passthrough"),
@@ -1397,7 +1833,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global UC_SLOT_MAP, UC_MODELS, LISTEN_PORT, UPSTREAM, MAX_TOKENS_FLOOR
+    global UC_SLOT_MAP, UC_MODELS, LISTEN_PORT, UPSTREAM, MAX_TOKENS_FLOOR, ROUTER
     cfg_path = os.environ.get("UC_CONFIG", "") or _default_config_path()
     try:
         cfg = load_config(cfg_path)
@@ -1420,6 +1856,7 @@ def main():
 
     UC_SLOT_MAP = _routes_to_slots(cfg.get("routes"))
     UC_MODELS = _models_from_config(cfg.get("models"))
+    _configure_router(cfg.get("router"))
     _wire_orchestrator_worker()
     if UC_MODELS:
         log("  advertising %d model(s) on GET /v1/models:" % len(UC_MODELS))
@@ -1435,6 +1872,18 @@ def main():
         log("  codex_oauth helper not importable (codex_oauth routes will 501)")
     if _cursor_agent is None:
         log("  cursor_agent helper not importable (cursor_agent routes will 501)")
+    if _router_is_enabled():
+        avail = _router_available_candidates()
+        log("  Auto Router ON: id=%s classifier=%s threshold=%.2f candidates=%s"
+            % (ROUTER["id"], ROUTER.get("classifier"), float(ROUTER.get("threshold", 0.7)),
+               ", ".join("%s($%s)" % (c["id"], c.get("cost")) for c in avail) or "(none available)"))
+        if not avail:
+            log("  Auto Router WARNING: no candidate backend is configured; it will pass through")
+        elif ROUTER.get("classifier") not in UC_SLOT_MAP:
+            log("  Auto Router NOTE: classifier '%s' is not a configured route; "
+                "using deterministic cheapest-candidate fallback" % ROUTER.get("classifier"))
+    elif isinstance(cfg.get("router"), dict) and cfg["router"].get("enabled") and not ROUTER_ENABLED_ENV:
+        log("  Auto Router disabled via UC_ROUTER=0")
     httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     log("ultracode-proxy listening on http://%s:%d -> %s"
         % (LISTEN_HOST, LISTEN_PORT, UPSTREAM))

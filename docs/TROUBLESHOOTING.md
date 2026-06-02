@@ -113,6 +113,39 @@ similar flag under a different name; the generic `body` dict lets you pass
 whatever request param that provider documents. See
 [ADD_A_MODEL.md](ADD_A_MODEL.md#minimax-m3).
 
+### Auto Router always picks the same model / isn't escalating
+
+Run the proxy with `UC_ROUTER_LOG=1` and read the `[router] ... scores={...}`
+lines in the log (paths above). Then:
+
+- **Only one candidate is available.** Candidates whose `id` isn't a configured
+  route are skipped; with one left, the router just uses it. Add more candidate
+  routes. `GET /healthz` → `router.candidates` shows what's actually live.
+- **Classifier can't run** → you'll see `no classifier` / `classifier failed` and
+  a deterministic cheapest pick. Make sure `router.classifier` is a working route
+  (test that model on its own first).
+- **Cards are too vague.** The classifier routes off the `card` text. Spell out
+  each candidate's strengths *and* weaknesses (see [AUTO_ROUTER.md](AUTO_ROUTER.md)).
+- **Threshold too low/high.** Everything clears a low bar → always the cheapest;
+  nothing clears a high bar → always the top scorer. Nudge `router.threshold`
+  (0.7 is a good middle).
+- **Caching looks "stuck".** The decision is cached per task (per user message);
+  follow-up tool-call round-trips reuse it on purpose. A new instruction
+  re-classifies.
+
+### Auto Router picked a model but I wanted to choose manually
+
+Pick any concrete model in `/model` (or the selector) instead of
+`Auto (smart routing)`. To turn the feature off entirely, set
+`router.enabled: false` in `config.json`, or launch with `UC_ROUTER=0`.
+
+### "Auto (smart routing)" doesn't appear in `/model`
+
+- `router.enabled` is `false`, or there's no `router` block.
+- The `claude-auto` id was removed from `models`/`routes`. The proxy auto-creates
+  them when `router.enabled` is true; re-run `python scripts/doctor.py` to confirm
+  the router section is green.
+
 ### Composer (`cursor_agent`) hangs or times out
 
 `cursor-agent` reaches Cursor's cloud on its own. If you're behind a

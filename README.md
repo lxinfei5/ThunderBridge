@@ -69,6 +69,57 @@ your picks too — so **"use MiniMax" really means MiniMax everywhere**, not Opu
 behind the scenes. Toggle off with `UC_ORCH_WORKER=0`. Workers run fully in
 parallel (threaded proxy, no artificial concurrency cap).
 
+## Auto Router: the right model for every task, automatically 🧭
+
+<p align="center">
+  <img src="assets/brand/auto-router.png" alt="Auto Router: a cheap classifier scores each backend 0–1 on the task, the proxy routes to the cheapest one scoring ≥ 0.70, so trivial turns go cheap and hard turns escalate" width="100%">
+</p>
+
+Don't want to pick at all? Choose **`Auto (smart routing)`** and the proxy
+decides *per task* which of your backends to use — **trivial turns go to a cheap
+model, hard turns escalate to your strongest one.** Same idea as Factory Droid's
+model router ("frontier quality, lower cost"), rebuilt on the models *you*
+already pay for.
+
+A tiny, cheap **classifier** model you nominate scores each candidate `0–1` on
+how likely it is to nail the current task (reading a short capability card you
+write for each). The proxy then routes to the **cheapest candidate that clears a
+quality bar** (default `0.7`). The classifier never sees price, so it can't be
+biased toward expensive models; decisions are cached per task; and it degrades
+safely (any failure falls back to a sensible default and never breaks a request).
+It's **off until you configure it** — the shipped `config.example.json` has a
+ready-to-use block. Full guide: [docs/AUTO_ROUTER.md](docs/AUTO_ROUTER.md).
+
+```jsonc
+"router": {
+  "enabled": true,
+  "classifier": "claude-mimo",        // your cheapest fast model does the scoring
+  "threshold": 0.7,                   // cheapest candidate scoring >= this wins
+  "candidates": [
+    { "id": "claude-minimax-m3",    "cost": 0.3, "card": "cheap; single-file edits, codegen, simple refactors" },
+    { "id": "claude-gpt-5.5-codex", "cost": 5.0, "card": "frontier; big refactors, hard debugging, images" }
+  ]
+}
+```
+
+Works as your orchestrator, your worker, or both. Watch it decide with
+`UC_ROUTER_LOG=1`.
+
+**See it route, offline (no keys):**
+
+```
+python3 examples/auto_router_demo.py
+```
+
+```text
+#  Task                                         Classifier scores                Routed to      Cost
+1  add a docstring to the foo() helper          cheap=0.90 mid=0.92 strong=0.95  claude-cheap   $0.3
+2  write a CRUD REST endpoint with tests        cheap=0.50 mid=0.85 strong=0.95  claude-mid     $1.0
+3  refactor the auth module across 8 files ...  cheap=0.40 mid=0.55 strong=0.95  claude-strong  $5.0
+4  what does this screenshot show?  [image]     cheap=0.90 mid=0.92 strong=0.95  claude-strong  $5.0  ← only vision-capable
+5  (repeat task #1)                             served from cache                claude-cheap   $0.3  ← classifier not re-called
+```
+
 ## Built for long, dynamic workflows ✨
 
 UltraCode shines on *long, autonomous* runs — deep reasoning, multi-step
@@ -204,6 +255,7 @@ Route types:
 | `openai_compat` | MiMo, DeepSeek, OpenRouter, OpenAI, Ollama, local llama.cpp — anything that speaks OpenAI Chat Completions (tools included) | an API key |
 | `codex_oauth`   | GPT‑5.5 via a ChatGPT/Codex login (no API key)     | `codex login` once |
 | `cursor_agent`  | Cursor Composer (experimental)                     | `cursor-agent login` |
+| `auto`          | The [Auto Router](docs/AUTO_ROUTER.md) — score candidates per task and route to the cheapest that's good enough | a `router` block + a classifier model |
 
 > **Reasoning models (MiniMax‑M3, etc.):** an `openai_compat` route can carry a
 > `"body": { ... }` dict of extra params merged into every request. **MiniMax‑M3**
@@ -234,6 +286,7 @@ test → troubleshoot) written for an AI to follow.
 | [AGENTS.md](AGENTS.md) | Runbook for an AI assistant to install/configure/test |
 | [docs/SETUP.md](docs/SETUP.md) | Human setup guide (Windows + macOS/Linux) |
 | [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | The mechanism + reverse-engineering evidence |
+| [docs/AUTO_ROUTER.md](docs/AUTO_ROUTER.md) | The Auto Router — pick the right model per task automatically |
 | [docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md) | Add any backend to the `/model` menu |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Symptom → cause → fix |
 

@@ -73,6 +73,35 @@ Rules you must enforce:
   `claude-minimax-m3`. The `body` dict is the general way to pass any
   provider‑specific request param.
 
+## Phase 3.5 — (Optional) Auto Router
+
+If the user wants UltraCode to **pick the model per task automatically** (cheap
+model for trivial turns, strong model for hard ones), configure the `router`
+block in `config.json`. It's already present and enabled in `config.example.json`
+— you mainly prune it to the models they kept. Full reference:
+`docs/AUTO_ROUTER.md`.
+
+Rules you must enforce:
+- `router.id` (default `claude-auto`) MUST also appear in `models` and have a
+  `{"type":"auto"}` route. (The example already includes all three; the proxy
+  also auto-creates them if `router.enabled` and they're missing.)
+- Every `candidates[].id` and `router.classifier` MUST be a key in `routes`.
+  Candidates without a route are silently skipped, so prune the candidate list to
+  match the routes the user kept.
+- `router.classifier` should be the **cheapest, fastest** model they configured
+  (it runs on every new task). If it's unavailable the router still works — it
+  just falls back to the cheapest candidate without scoring.
+- `candidates[].cost` is a **relative** weight (ordering only). Order them
+  cheap→expensive.
+- Set `candidates[].supports_images` truthfully; image tasks skip models that
+  can't see.
+- Write an honest `candidates[].card` (strengths AND weaknesses) — that text is
+  literally what the classifier reads to route. Vague cards → vague routing.
+- If the user does NOT want auto routing, set `"enabled": false` (or delete the
+  `router` block). The `claude-auto` model just won't appear.
+
+The doctor (next phase) validates all of this.
+
 ## Phase 4 — Validate the real config
 
 Run the doctor again:
@@ -104,6 +133,10 @@ selector, then passes the selected orchestrator as `claude --model ...`. Set
 3. Send a trivial prompt ("say OK"). Confirm a reply uses the selected model.
 4. Pick one that needs tools and ask something requiring a tool call; confirm tools
    fire (the proxy translates tool calls both ways).
+5. If you configured the Auto Router: pick **`Auto (smart routing)`**, run the
+   proxy with `UC_ROUTER_LOG=1`, send a trivial prompt then a hard one, and
+   confirm the proxy log shows a `[router] ... -> <model>` line choosing a cheap
+   model for the trivial turn and a stronger one for the hard turn.
 
 If a model doesn't appear or errors, go to `docs/TROUBLESHOOTING.md` and match the
 symptom. Common ones:

@@ -22,6 +22,7 @@ SEEN_ANTH = None
 
 class Mock(BaseHTTPRequestHandler):
     RETRY_HITS = 0  # counts hits for the "retry-model" empty-then-recover case
+    SEEN_BY_MODEL = {}  # backend model id -> last request body (Auto Router checks)
 
     def log_message(self, *a):
         pass
@@ -49,6 +50,24 @@ class Mock(BaseHTTPRequestHandler):
         if path.endswith("/v1/chat/completions"):
             SEEN_OAI = body
             SEEN_OAI_HEADERS = {k: v for k, v in self.headers.items()}
+            Mock.SEEN_BY_MODEL[body.get("model")] = body
+
+            # Auto Router classifier: respond with plain JSON scores (the proxy's
+            # classifier path is non-streaming). A "refactor"-ish task scores the
+            # cheap model low so routing escalates to the strong candidate.
+            if body.get("model") == "router-classifier":
+                # Inspect ONLY the user turn (the task), not the system prompt -
+                # the candidate cards themselves mention "refactor".
+                user_msg = " ".join(m.get("content", "") for m in body.get("messages", [])
+                                    if m.get("role") == "user" and isinstance(m.get("content"), str))
+                hard = "refactor" in user_msg.lower()
+                scores = {"claude-cheap": 0.4 if hard else 0.9,
+                          "claude-strong": 0.92}
+                self._j(200, {"choices": [{"message": {
+                    "content": json.dumps({"scores": scores, "reasoning": "test"})}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}})
+                return
+
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
@@ -114,7 +133,10 @@ def main():
     config = {
         "proxy": {"listen_port": PROXY_PORT, "anthropic_upstream": mock, "max_tokens_floor": 64000},
         "models": [{"id": "claude-mock", "display_name": "Mock Model"},
-                   {"id": "claude-retry", "display_name": "Retry Model"}],
+                   {"id": "claude-retry", "display_name": "Retry Model"},
+                   {"id": "claude-auto", "display_name": "Auto"},
+                   {"id": "claude-cheap", "display_name": "Cheap"},
+                   {"id": "claude-strong", "display_name": "Strong"}],
         "routes": {
             "claude-opus-4-8": {"model": "claude-opus-4-8", "upstream": mock, "auth": "passthrough"},
             "claude-mock": {"type": "openai_compat", "model": "mock-model",
@@ -124,6 +146,25 @@ def main():
                             "body": {"reasoning_split": True}},
             "claude-retry": {"type": "openai_compat", "model": "retry-model",
                              "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}"},
+            # Auto Router: a synthetic 'auto' picker, two real candidates, and a
+            # cheap classifier - all pointed at the mock backend.
+            "claude-auto": {"type": "auto"},
+            "claude-cheap": {"type": "openai_compat", "model": "cheap-real",
+                             "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}"},
+            "claude-strong": {"type": "openai_compat", "model": "strong-real",
+                              "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}"},
+            "claude-classifier": {"type": "openai_compat", "model": "router-classifier",
+                                  "upstream": mock + "/v1", "auth": "Bearer ${MOCK_KEY}"},
+        },
+        "router": {
+            "enabled": True, "id": "claude-auto", "classifier": "claude-classifier",
+            "threshold": 0.7, "default": "claude-cheap", "cache": True,
+            "candidates": [
+                {"id": "claude-cheap", "cost": 0.3, "supports_images": False,
+                 "card": "cheap fast single-file tasks"},
+                {"id": "claude-strong", "cost": 5.0, "supports_images": True,
+                 "card": "frontier multi-file refactors and debugging"},
+            ],
         },
     }
     cfg_f = os.path.join(GW, "_test_config.json")
@@ -145,7 +186,13 @@ def main():
 
         ids = [x["id"] for x in json.loads(_get("/v1/models"))["data"]]
         assert "claude-mock" in ids and "claude-opus-4-8" in ids, ids
+        assert "claude-auto" in ids, ids  # Auto Router picker is discoverable
         print("[ok] /v1/models discovery merge:", ids)
+
+        h2 = json.loads(_get("/healthz"))
+        assert h2["router"]["enabled"] and h2["router"]["id"] == "claude-auto", h2["router"]
+        assert {c["id"] for c in h2["router"]["candidates"]} == {"claude-cheap", "claude-strong"}, h2["router"]
+        print("[ok] healthz reports Auto Router config")
 
         _post("/v1/messages", {"model": "claude-opus-4-8", "max_tokens": 100,
                                "messages": [{"role": "user", "content": "hi"}]})
@@ -183,11 +230,51 @@ def main():
         assert "recovered" in out, out
         print("[ok] empty turn auto-retried -> recovered (upstream hit %dx)" % Mock.RETRY_HITS)
 
+        # Auto Router (end-to-end through the running proxy): picking claude-auto
+        # consults the classifier, then routes the REAL request to the cheapest
+        # candidate that clears the bar. A trivial task -> cheap; a hard refactor
+        # -> the strong candidate. We verify which backend model actually got hit.
+        Mock.SEEN_BY_MODEL.clear()
+        _post("/v1/messages", {"model": "claude-auto", "max_tokens": 50,
+                               "messages": [{"role": "user", "content": "say ok"}]})
+        assert "router-classifier" in Mock.SEEN_BY_MODEL, list(Mock.SEEN_BY_MODEL)
+        assert "cheap-real" in Mock.SEEN_BY_MODEL, list(Mock.SEEN_BY_MODEL)
+        assert "strong-real" not in Mock.SEEN_BY_MODEL, list(Mock.SEEN_BY_MODEL)
+        print("[ok] auto router: trivial task -> cheapest viable candidate (claude-cheap)")
+
+        Mock.SEEN_BY_MODEL.clear()
+        _post("/v1/messages", {"model": "claude-auto", "max_tokens": 50,
+                               "messages": [{"role": "user",
+                                             "content": "do a huge multi-file refactor across the whole codebase"}]})
+        assert "strong-real" in Mock.SEEN_BY_MODEL, list(Mock.SEEN_BY_MODEL)
+        assert "cheap-real" not in Mock.SEEN_BY_MODEL, list(Mock.SEEN_BY_MODEL)
+        print("[ok] auto router: hard task escalates to the strong candidate (claude-strong)")
+
         sys.path.insert(0, GW)
         import proxy as up
         os.environ["MOCK_KEY"] = "secret123"
         assert up._expand_env("Bearer ${MOCK_KEY}") == "Bearer secret123"
         print("[ok] ${ENV} expansion in route auth")
+
+        # Auto Router unit logic (in-process): cheapest-among-viable selection,
+        # the image hard-zero, the below-bar best-effort pick, score parsing
+        # (clamp + extraction from prose), and the user-task signal extraction.
+        rc = [{"id": "a", "cost": 0.3, "supports_images": False},
+              {"id": "b", "cost": 5.0, "supports_images": True}]
+        assert up._router_pick({"a": 0.9, "b": 0.95}, rc, 0.7, False)[0] == "a"   # cheapest >= bar
+        assert up._router_pick({"a": 0.9, "b": 0.95}, rc, 0.7, True)[0] == "b"    # images -> 'a' hard-zeroed
+        assert up._router_pick({"a": 0.4, "b": 0.5}, rc, 0.7, False)[0] == "b"    # none clear bar -> best
+        assert up._parse_scores('noise {"scores":{"a":1.7,"b":-2},"reasoning":"x"} tail',
+                                ["a", "b"]) == {"a": 1.0, "b": 0.0}               # clamp + extract
+        # latest non-tool user turn is the task; pure tool_result turns are skipped
+        assert up._last_user_text({"messages": [
+            {"role": "user", "content": "real ask"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "x", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "r"}]},
+        ]}) == "real ask"
+        assert up._has_images({"messages": [
+            {"role": "user", "content": [{"type": "image", "source": {}}]}]}) is True
+        print("[ok] auto router unit: selection / image-reject / score-parse / signal")
 
         # issue #3: a rejected tool call (with or without a comment) must not leave
         # an assistant tool_calls message unanswered, and tool replies must come

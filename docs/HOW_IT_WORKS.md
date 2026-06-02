@@ -117,6 +117,46 @@ log the per-request tier + remap.
 fans out are handled concurrently — there's no artificial serialization in the
 shim; throughput is bounded only by your backend's own rate limits.
 
+## 5.5 Auto Router (pick the model per task)
+
+A route of `type: "auto"` is not a backend — it's the **Auto Router**. When a
+request resolves to the auto picker (`claude-auto`), the proxy:
+
+1. Builds a compact task signal from the request (the latest non-tool user
+   message, whether images are present, the tier/surface, turn count).
+2. Sends a small, non-streaming scoring request to the **classifier** model named
+   in `config.json → router.classifier` (one of your own cheap backends). The
+   classifier prompt contains a short **capability card** for each candidate and
+   asks for a `0.0–1.0` first-try success probability per candidate.
+3. Parses the scores (clamped to `[0,1]`; any candidate that can't take images is
+   hard-zeroed when the task has images), then selects the **cheapest candidate
+   whose score ≥ `threshold`** (default `0.7`); if none clear it, the highest
+   scorer wins.
+4. Rewrites `body["model"]` to that candidate and dispatches through the normal
+   route path (so tool translation, reliability, etc. all still apply).
+
+The classifier is **never told the price** — cost only enters via the
+"cheapest among those good enough" tie-break, so it can't be nudged toward
+expensive models. The decision is **cached per task** (keyed on the user message
++ tier) so a task's tool-call round-trips don't re-pay the classifier. It runs in
+both tiers: `Auto` as orchestrator routes the main loop; `Worker → Auto` routes
+every sub-agent.
+
+It fails safe at every step: a missing/again classifier or any error falls back
+to `router.default` (or the cheapest candidate) deterministically; candidates
+without a configured route are skipped; and if the router is disabled while
+`claude-auto` is somehow picked, it's coerced to a real candidate so the synthetic
+id is never sent upstream. Full reference: [AUTO_ROUTER.md](AUTO_ROUTER.md).
+
+Router knobs:
+
+| Env var | Default | What it does |
+|---------|---------|--------------|
+| `UC_ROUTER` | `1` | Master runtime switch; `0` disables even if enabled in config. |
+| `UC_ROUTER_TIMEOUT` | `12` | Seconds to wait for the classifier before falling back. |
+| `UC_ROUTER_MAX_TOKENS` | `600` | Cap on the classifier's reply (it only emits small JSON). |
+| `UC_ROUTER_LOG` | `0` | Log each routing decision + raw scores. |
+
 ## 6. Reliability — surviving long and dynamic workflows
 
 UltraCode's value is *long, autonomous* runs (deep reasoning, multi-step
