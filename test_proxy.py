@@ -350,6 +350,33 @@ def main():
                        for c in _cp), _items
         print("[ok] image forwarding: user image -> openai_compat image_url + codex input_image")
 
+        # Computer-use / screenshot / image tools return images INSIDE a tool_result.
+        # tool-role messages can't carry images, so the proxy keeps the text in the
+        # tool reply and re-sends the image in the FOLLOWING user message (which the
+        # codex path then maps to input_image). Tool->tool_calls adjacency must hold.
+        _tr_img = {"type": "image", "source": {"type": "base64",
+                   "media_type": "image/png", "data": "WFla"}}
+        _m = up.anthropic_to_openai({"model": "m", "messages": [
+            {"role": "user", "content": "take a screenshot"},
+            _assistant_calls("call_1"),
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_1",
+                 "content": [{"type": "text", "text": "captured"}, _tr_img]},
+                {"type": "text", "text": "what is in it?"}]}]})["messages"]
+        _assert_tool_adjacency(_m)  # tool reply still immediately follows tool_calls
+        _tmsg = [x for x in _m if x.get("role") == "tool" and x["tool_call_id"] == "call_1"]
+        assert _tmsg and isinstance(_tmsg[0]["content"], str) and "captured" in _tmsg[0]["content"], _m
+        _umsg = [x for x in _m if x.get("role") == "user" and isinstance(x.get("content"), list)][-1]
+        _uimg = [p for p in _umsg["content"] if p.get("type") == "image_url"]
+        assert _uimg and _uimg[0]["image_url"]["url"] == "data:image/png;base64,WFla", _m
+        assert any(p.get("type") == "text" and "what is in it?" in p.get("text", "") for p in _umsg["content"]), _m
+        if up._codex_oauth is not None:
+            _i2, _items2 = up._codex_oauth._messages_to_responses_input(_m)
+            _cp2 = [c for it in _items2 for c in (it.get("content") or [])]
+            assert any(c.get("type") == "input_image" and c.get("image_url") == "data:image/png;base64,WFla"
+                       for c in _cp2), _items2
+        print("[ok] tool_result images forwarded (computer-use/screenshots) -> user image + codex input_image")
+
         # Orchestrator + Worker: the picker should advertise a "Worker -> X" entry
         # per model, a plain pick should drive BOTH tiers (capturing the dynamic
         # workflow's stock-model background traffic), and a worker pick should set
