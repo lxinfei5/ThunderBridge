@@ -783,6 +783,86 @@ def _text_from_anthropic_content(content) -> str:
     return "\n".join(p for p in parts if p)
 
 
+def _oai_image_url_from_anthropic_source(source) -> str:
+    """Anthropic image `source` -> an OpenAI-style image URL string. A base64
+    source becomes a data: URL; a url source is passed through. "" if unusable."""
+    if not isinstance(source, dict):
+        return ""
+    stype = source.get("type")
+    if stype == "base64":
+        data = source.get("data") or ""
+        if not data:
+            return ""
+        return "data:%s;base64,%s" % (source.get("media_type") or "image/png", data)
+    if stype == "url":
+        return source.get("url") or ""
+    return ""
+
+
+def _content_has_image(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "image" for b in content)
+
+
+def _anthropic_content_to_oai(content):
+    """OpenAI chat `content` for a user message. Returns a plain string when the
+    content is text-only (the overwhelmingly common case -- behavior unchanged),
+    or a list of typed parts ({"type":"text"} / {"type":"image_url"}) when image
+    blocks are present, so vision-capable backends actually receive the image
+    instead of the "[image omitted]" stub."""
+    if not _content_has_image(content):
+        return content if isinstance(content, str) else _text_from_anthropic_content(content)
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            if block:
+                parts.append({"type": "text", "text": block})
+            continue
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            txt = block.get("text") or ""
+            if txt:
+                parts.append({"type": "text", "text": txt})
+        elif btype == "image":
+            url = _oai_image_url_from_anthropic_source(block.get("source"))
+            parts.append({"type": "image_url", "image_url": {"url": url}} if url
+                         else {"type": "text", "text": "[image omitted]"})
+        elif btype == "tool_result":
+            txt = _text_from_anthropic_content(block.get("content"))
+            if txt:
+                parts.append({"type": "text", "text": txt})
+    return parts or ""
+
+
+def _toolresult_text_and_images(content):
+    """Split an Anthropic tool_result's content into (text, [OpenAI image_url
+    parts]). Tool-role messages can't carry images on OpenAI/codex backends, so
+    callers re-send the images in a following user message instead of dropping
+    them — keeps computer-use / screenshot / image tool output visible to vision
+    models."""
+    if isinstance(content, str):
+        return content, []
+    if not isinstance(content, list):
+        return _text_from_anthropic_content(content), []
+    texts, images = [], []
+    for b in content:
+        if isinstance(b, str):
+            if b:
+                texts.append(b)
+        elif isinstance(b, dict):
+            bt = b.get("type")
+            if bt == "text":
+                if b.get("text"):
+                    texts.append(b["text"])
+            elif bt == "image":
+                url = _oai_image_url_from_anthropic_source(b.get("source"))
+                if url:
+                    images.append({"type": "image_url", "image_url": {"url": url}})
+    return "\n".join(texts), images
+
+
 def _anthropic_tools_to_oai(tools):
     out = []
     for tool in tools or []:
@@ -841,14 +921,27 @@ def anthropic_to_openai(body: dict) -> dict:
     # replies FIRST, and synthesize a stub for any id the client didn't answer.
     pending_tool_ids = []  # mutated in place (never rebound) so the closure stays valid
 
+    # Emit a single `tool` reply; if the result carried image(s) (a screenshot
+    # etc.), put the text in the reply and append the images to `carried` as
+    # OpenAI parts — tool-role messages can't hold images, so they ride along in
+    # the user message that follows the tool replies.
+    def _tool_reply(tid, tr, carried):
+        text, imgs = _toolresult_text_and_images(tr.get("content"))
+        if imgs and not text:
+            text = "(image output is in the next message)"
+        messages.append({"role": "tool", "tool_call_id": tid or "call_unknown",
+                         "content": text or "(no output)"})
+        if imgs:
+            carried.append({"type": "text",
+                            "text": "[image output from tool call %s]" % (tid or "call_unknown")})
+            carried.extend(imgs)
+
     def _flush_tool_replies(by_id):
+        carried = []
         for tid in pending_tool_ids:
             tr = by_id.pop(tid, None)
             if tr is not None:
-                messages.append({
-                    "role": "tool", "tool_call_id": tid,
-                    "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
-                })
+                _tool_reply(tid, tr, carried)
             else:
                 messages.append({
                     "role": "tool", "tool_call_id": tid,
@@ -856,11 +949,9 @@ def anthropic_to_openai(body: dict) -> dict:
                 })
         # Stray results that didn't match a pending id (unusual) — keep them anyway.
         for tid, tr in by_id.items():
-            messages.append({
-                "role": "tool", "tool_call_id": tid or "call_unknown",
-                "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
-            })
+            _tool_reply(tid, tr, carried)
         del pending_tool_ids[:]
+        return carried
 
     for m in body.get("messages", []):
         if not isinstance(m, dict):
@@ -907,29 +998,37 @@ def anthropic_to_openai(body: dict) -> dict:
                                 if isinstance(b, dict) and b.get("type") == "tool_result"]
                 text_blocks = [b for b in content
                                if not (isinstance(b, dict) and b.get("type") == "tool_result")]
-                text = _text_from_anthropic_content(text_blocks)
+                user_content = _anthropic_content_to_oai(text_blocks)
             else:
                 tool_results = []
-                text = content if isinstance(content, str) else _text_from_anthropic_content(content)
+                user_content = _anthropic_content_to_oai(content)
 
             # 1. Tool replies FIRST — immediately after the assistant's tool_calls,
-            #    in tool_call order, stubbing any the client left unanswered.
+            #    in tool_call order, stubbing any the client left unanswered. Image
+            #    output inside a tool_result is carried out (tool messages can't
+            #    hold images) to ride along in the user message below.
+            carried = []
             if pending_tool_ids:
                 by_id = {}
                 for tr in tool_results:
                     by_id.setdefault(tr.get("tool_use_id") or "call_unknown", tr)
-                _flush_tool_replies(by_id)
+                carried = _flush_tool_replies(by_id)
             else:
                 for tr in tool_results:
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tr.get("tool_use_id") or "call_unknown",
-                        "content": _text_from_anthropic_content(tr.get("content")) or "(no output)",
-                    })
+                    _tool_reply(tr.get("tool_use_id"), tr, carried)
 
-            # 2. THEN the user's own text (e.g. the rejection comment).
-            if text:
-                messages.append({"role": "user", "content": text})
+            # 2. THEN the user's own content, prefixed by any images the tools
+            #    returned (e.g. a screenshot) so vision models actually see them.
+            #    Folding both into one user message right after the tool replies
+            #    keeps strict OpenAI-compatible backends happy.
+            if isinstance(user_content, list):
+                combined = carried + user_content
+            elif user_content:  # non-empty string
+                combined = carried + [{"type": "text", "text": user_content}] if carried else user_content
+            else:
+                combined = carried
+            if combined:
+                messages.append({"role": "user", "content": combined})
             continue
 
         # Plain string content or unexpected role.
