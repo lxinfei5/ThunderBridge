@@ -130,6 +130,61 @@ $RefDir   = Join-Path $StateDir "refs"
 $PidFile  = Join-Path $StateDir "proxy.pid"
 $OwnerRef = Join-Path $RefDir "$PID"
 
+# Preserve the user-global model across the session. Claude Code persists an
+# in-session /model pick (Enter in the picker) to settings.json as the `model`
+# key (v2.1.153+), so picking a proxy-only id would become your global default
+# and break a plain `claude` run outside the proxy. We snapshot that key before
+# launch and restore it on exit (ref-count-safe). The JSON edit is done via
+# Python (not ConvertTo-Json) so the rest of settings.json is left byte-for-key
+# intact. Disable with UC_PRESERVE_GLOBAL_MODEL=0.
+$CfgDir              = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
+$GlobalSettings      = Join-Path $CfgDir "settings.json"
+$SavedModelFile      = Join-Path $StateDir "saved_global_model.json"
+$PreserveGlobalModel = ($env:UC_PRESERVE_GLOBAL_MODEL -ne "0")
+$SnapPy = @'
+import json,sys
+src,dst=sys.argv[1],sys.argv[2]
+try: s=json.load(open(src))
+except Exception: s={}
+json.dump({"had":"model" in s,"model":s.get("model")},open(dst,"w"))
+'@
+$RestorePy = @'
+import json,sys
+settings_f,saved_f=sys.argv[1],sys.argv[2]
+try: saved=json.load(open(saved_f))
+except Exception: saved={}
+try: s=json.load(open(settings_f))
+except Exception: s=None
+if isinstance(s,dict):
+    if saved.get("had"): s["model"]=saved.get("model")
+    else: s.pop("model",None)
+    f=open(settings_f,"w"); json.dump(s,f,indent=2); f.write("\n"); f.close()
+'@
+
+function Invoke-UcPy {
+    param([string]$Code, [string[]]$Rest)
+    $a = @()
+    if ($PyCmd.Count -gt 1) { $a += $PyCmd[1..($PyCmd.Count-1)] }
+    $a += @("-c", $Code) + $Rest
+    & $PyCmd[0] @a 2>$null
+}
+
+function Save-GlobalModel {
+    if (-not $PreserveGlobalModel) { return }
+    # Clean start: refresh the snapshot. Other session live: keep theirs so we
+    # never capture a mid-session pick as the "original".
+    if ((Test-RefsActive) -and (Test-Path $SavedModelFile)) { return }
+    try { Invoke-UcPy $SnapPy @($GlobalSettings, $SavedModelFile) } catch {}
+}
+
+function Restore-GlobalModel {
+    if (-not $PreserveGlobalModel) { return }
+    if (-not (Test-Path $SavedModelFile)) { return }
+    if (Test-RefsActive) { return }   # other sessions live; last one out restores
+    try { Invoke-UcPy $RestorePy @($GlobalSettings, $SavedModelFile) } catch {}
+    Remove-Item $SavedModelFile -Force -ErrorAction SilentlyContinue
+}
+
 function Test-ProxyHealthy {
     try { return (Invoke-WebRequest -Uri "$BaseUrl/healthz" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200 }
     catch { return $false }
@@ -152,6 +207,7 @@ function Test-RefsActive {
 
 function Stop-ProxyIfLast {
     Remove-Item $OwnerRef -Force -ErrorAction SilentlyContinue
+    Restore-GlobalModel
     if (Test-RefsActive) { return }
     if (Test-Path $PidFile) {
         $stopId = Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -161,6 +217,7 @@ function Stop-ProxyIfLast {
 }
 
 New-Item -ItemType Directory -Force -Path $RefDir | Out-Null
+Save-GlobalModel
 New-Item -ItemType File -Force -Path $OwnerRef | Out-Null
 
 if (Test-ProxyHealthy) {
@@ -190,7 +247,6 @@ if (Test-ProxyHealthy) {
 # ----- seed Claude Code's gateway-models cache (first-launch visibility) -----
 # Seed stock Claude + your configured models so real Claude and your picks all
 # show on the very first /model open (before Claude Code re-fetches /v1/models).
-$CfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $HOME ".claude" }
 $GwCache = Join-Path (Join-Path $CfgDir "cache") "gateway-models.json"
 try {
     New-Item -ItemType Directory -Force -Path (Split-Path $GwCache) | Out-Null
@@ -217,6 +273,7 @@ try {
 
 if ($ProxyOnly) {
     Remove-Item $OwnerRef -Force -ErrorAction SilentlyContinue
+    Restore-GlobalModel
     $shownPid = if (Test-Path $PidFile) { Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1 } else { "<pid>" }
     Write-Host ""
     Write-Host "Proxy running. Connect Claude Code with:"
