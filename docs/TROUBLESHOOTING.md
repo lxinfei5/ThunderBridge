@@ -57,6 +57,30 @@ caches them, so a new Opus normally appears on its own. If it hasn't:
 - **Reset the learned cache.** Delete the file shown at `/healthz` →
   `stock_learning.cache` and relaunch.
 
+### A `/model` pick leaked into my global default (plain `claude` now errors on the model)
+
+Claude Code persists an in-session `/model` pick (pressing Enter in the picker) to
+your **user-global** settings (`~/.claude/settings.json`, the `model` key) as of
+v2.1.153. Under UltraCode that means picking a proxy-only id (e.g.
+`claude-composer`, `claude-gpt-5.5-codex`) becomes your global default — and a
+plain `claude` run **outside** the proxy then fails, because the real Anthropic
+API doesn't know that id.
+
+The launchers guard against this: `bin/ultracode` (and
+`windows\Start-UltraCode.ps1`) snapshot the `model` key before launch and restore
+it on exit, so `/model` picks stay session-scoped. It's ref-count-safe across
+concurrent sessions (the last one out restores) and only touches the `model` key —
+the rest of `settings.json` is left intact.
+
+- **Already polluted?** Set `"model"` in `~/.claude/settings.json` back to a real
+  id (e.g. `"claude-opus-4-8"`), or run `/model` once in a plain `claude` session
+  and pick a real Claude model.
+- **Want a `/model` pick to persist for plain `claude` too?** Disable the guard
+  with `UC_PRESERVE_GLOBAL_MODEL=0` before launching — in-session picks then save
+  globally as Claude Code normally does.
+- **Keep a pick for this session only without saving (even with the guard off):**
+  press `s` in the `/model` picker instead of Enter.
+
 ### The pre-launch selector doesn't open / says it cannot reach `/uc/select`
 
 - **Proxy not healthy yet or wrong port.** The launcher starts the proxy before

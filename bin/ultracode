@@ -28,6 +28,16 @@ PID_FILE="$BASE_STATE/proxy.pid"
 LOG_FILE="$BASE_STATE/proxy.log"
 REF_DIR="$BASE_STATE/refs"
 OWNER_REF="$REF_DIR/$$"
+SAVED_MODEL_FILE="$BASE_STATE/saved_global_model.json"
+
+# Claude Code persists an in-session `/model` pick (Enter in the picker) to the
+# user-global settings file as the `model` key (v2.1.153+). Under UltraCode that
+# means picking a proxy-only id (e.g. claude-composer) becomes your global
+# default and breaks a plain `claude` run outside the proxy. We snapshot that key
+# before launch and restore it on exit (ref-count-safe across sessions), so
+# /model picks stay session-scoped. Disable with UC_PRESERVE_GLOBAL_MODEL=0.
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+UC_PRESERVE_GLOBAL_MODEL="${UC_PRESERVE_GLOBAL_MODEL:-1}"
 
 PY="$(command -v python3 || command -v python || true)"
 [[ -n "$PY" ]] || { echo "Python 3 not found." >&2; exit 1; }
@@ -118,6 +128,53 @@ refs_active() {
   [[ -d "$REF_DIR" ]] && [[ -n "$(ls -A "$REF_DIR" 2>/dev/null)" ]]
 }
 
+snapshot_global_model() {
+  # Record the current user-global `model` so an in-session /model pick can't
+  # leave a proxy-only id as your default. On a clean start (no other live
+  # UltraCode session) take a fresh snapshot; if a session is already running,
+  # keep its snapshot so we don't capture a mid-session pick as the "original".
+  [[ "$UC_PRESERVE_GLOBAL_MODEL" == "0" ]] && return 0
+  refs_active && [[ -f "$SAVED_MODEL_FILE" ]] && return 0
+  "$PY" - "$CFG_DIR/settings.json" "$SAVED_MODEL_FILE" <<'PY' 2>/dev/null || true
+import json,sys
+src,dst=sys.argv[1],sys.argv[2]
+try:
+    s=json.load(open(src))
+except Exception:
+    s={}
+json.dump({"had":"model" in s,"model":s.get("model")},open(dst,"w"))
+PY
+}
+
+restore_global_model() {
+  # Last session out restores the saved `model` key (or removes it if there was
+  # none), undoing any /model pick that Claude Code persisted globally.
+  [[ "$UC_PRESERVE_GLOBAL_MODEL" == "0" ]] && return 0
+  [[ -f "$SAVED_MODEL_FILE" ]] || return 0
+  refs_active && return 0
+  "$PY" - "$CFG_DIR/settings.json" "$SAVED_MODEL_FILE" <<'PY' 2>/dev/null || true
+import json,sys
+settings_f,saved_f=sys.argv[1],sys.argv[2]
+try:
+    saved=json.load(open(saved_f))
+except Exception:
+    saved={}
+try:
+    s=json.load(open(settings_f))
+except Exception:
+    s=None
+if isinstance(s,dict):
+    if saved.get("had"):
+        s["model"]=saved.get("model")
+    else:
+        s.pop("model",None)
+    with open(settings_f,"w") as f:
+        json.dump(s,f,indent=2)
+        f.write("\n")
+PY
+  rm -f "$SAVED_MODEL_FILE"
+}
+
 start_proxy() {
   mkdir -p "$REF_DIR"
   : > "$OWNER_REF"
@@ -137,18 +194,19 @@ start_proxy() {
 
 stop_proxy() {
   rm -f "$OWNER_REF"
+  restore_global_model
   if refs_active; then return 0; fi
   [[ -f "$PID_FILE" ]] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
   rm -f "$PID_FILE"
 }
 trap stop_proxy EXIT
 
+snapshot_global_model
 start_proxy
 
 # Seed Claude Code's gateway-models cache from the live proxy so the stock Claude
 # models, your configured models, and the synthesized Worker -> entries all show
 # on the very first /model open (before Claude Code re-fetches /v1/models).
-CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 "$PY" - "$CFG_DIR/cache/gateway-models.json" "$BASE_URL" <<'PY' || true
 import json,os,sys,time,urllib.request
 cache_f, base = sys.argv[1], sys.argv[2]
