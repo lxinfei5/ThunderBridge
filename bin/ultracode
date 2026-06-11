@@ -175,6 +175,40 @@ PY
   rm -f "$SAVED_MODEL_FILE"
 }
 
+uc_status() {
+  if ! health_ok; then
+    echo "UltraCode proxy is not running on $BASE_URL" >&2
+    echo "Start it with: ultracode" >&2
+    exit 1
+  fi
+  "$PY" - "$BASE_URL" <<'PY'
+import json,sys,urllib.request
+base=sys.argv[1].rstrip('/')
+with urllib.request.urlopen(base+'/healthz',timeout=3) as r:
+    h=json.loads(r.read().decode())
+ow=h.get('orchestrator_worker') or {}
+orch=ow.get('orchestrator') or {}
+worker=ow.get('worker') or {}
+print('UltraCode proxy:', base)
+print('Orchestrator/worker routing:', 'on' if ow.get('enabled') else 'off')
+if ow.get('enabled'):
+    o=orch.get('display_name') or orch.get('id') or '(not set)'
+    w=worker.get('display_name') or worker.get('id') or '(not set)'
+    print('  Orchestrator:', o, ('('+orch.get('id')+')') if orch.get('id') else '')
+    print('  Worker:      ', w, ('('+worker.get('id')+')') if worker.get('id') else '')
+    if ow.get('worker_explicit'):
+        print('  (worker was set explicitly — plain /model picks change orchestrator only)')
+    elif ow.get('same_model'):
+        print('  (same model runs orchestrator and all workers)')
+print('Live detail: curl -s', base+'/healthz', '| python3 -m json.tool')
+PY
+}
+
+if [[ "${1:-}" == "status" ]]; then
+  uc_status
+  exit 0
+fi
+
 start_proxy() {
   mkdir -p "$REF_DIR"
   : > "$OWNER_REF"

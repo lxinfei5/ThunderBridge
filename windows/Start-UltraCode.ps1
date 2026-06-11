@@ -26,6 +26,7 @@
 #>
 param(
     [switch]$ProxyOnly,
+    [switch]$Status,
     [int]$Port = 0,
     [string]$Upstream = ""
 )
@@ -214,6 +215,30 @@ function Stop-ProxyIfLast {
         if ($stopId) { Stop-Process -Id ([int]$stopId) -Force -ErrorAction SilentlyContinue }
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
+}
+
+if ($Status) {
+    if (-not (Test-ProxyHealthy)) {
+        Write-Error "UltraCode proxy is not running on $BaseUrl. Start it with: .\windows\Start-UltraCode.ps1"
+        exit 1
+    }
+    $health = Invoke-RestMethod -Uri "$BaseUrl/healthz" -TimeoutSec 3
+    $ow = $health.orchestrator_worker
+    Write-Host "UltraCode proxy: $BaseUrl"
+    if ($ow.enabled) {
+        Write-Host "Orchestrator/worker routing: on"
+        Write-Host ("  Orchestrator: {0} ({1})" -f $ow.orchestrator.display_name, $ow.orchestrator.id)
+        Write-Host ("  Worker:       {0} ({1})" -f $ow.worker.display_name, $ow.worker.id)
+        if ($ow.worker_explicit) {
+            Write-Host "  (worker set explicitly — plain /model picks change orchestrator only)"
+        } elseif ($ow.same_model) {
+            Write-Host "  (same model runs orchestrator and all workers)"
+        }
+    } else {
+        Write-Host "Orchestrator/worker routing: off"
+    }
+    Write-Host "Live detail: curl -s $BaseUrl/healthz | python -m json.tool"
+    exit 0
 }
 
 New-Item -ItemType Directory -Force -Path $RefDir | Out-Null

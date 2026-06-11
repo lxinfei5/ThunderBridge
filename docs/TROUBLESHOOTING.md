@@ -81,6 +81,50 @@ the rest of `settings.json` is left intact.
 - **Keep a pick for this session only without saving (even with the guard off):**
   press `s` in the `/model` picker instead of Enter.
 
+### Which model is orchestrator vs worker right now?
+
+Orchestrator/worker routing is sticky inside the proxy process, but Claude Code's
+UI doesn't show the two tiers separately.
+
+- **Quick status:** `ultracode status` (mac/Linux/WSL) or
+  `.\windows\Start-UltraCode.ps1 -Status` (Windows). Shows the active
+  orchestrator and worker ids + display names.
+- **JSON:** `curl -s http://127.0.0.1:8141/healthz | python3 -m json.tool` →
+  `orchestrator_worker`.
+- **Also:** `curl -s http://127.0.0.1:8141/uc/select` returns the same
+  `active` block while the proxy is running.
+
+**Changing models mid-session:**
+
+| What you pick in `/model` | What changes |
+|---------------------------|--------------|
+| A plain model (e.g. `claude-minimax-m3`) | **Both** orchestrator and worker → that model runs everything |
+| `Worker → <model>` | **Worker only** — orchestrator stays as-is |
+| Stock ids (`claude-opus-4-8`, sonnet, haiku) | **Neither tier** — they're remapped to your picks for background traffic |
+
+**Worker hit a rate limit mid-task?** Open `/model`, pick `Worker → <other model>`.
+The orchestrator tier is unchanged; only parallel workers/sub-agents switch.
+
+**`/model orchestrator` / `/model worker`?** Not available — `/model` is Claude
+Code's built-in picker; the proxy only sees the resulting model id on the next
+request. Use the plain vs `Worker →` entries above.
+
+### OpenAI-compat backend errors on long sessions (context length / 400)
+
+The proxy forwards the **entire** Anthropic transcript to `openai_compat` backends
+with no automatic trimming. On long multi-tool workflows a backend may return
+`context length exceeded`, `maximum context`, or similar 400s.
+
+- **First:** compact the session (`/compact` in Claude Code) or start a fresh
+  session and carry over only what you need.
+- **Switch worker only:** if the orchestrator is fine but workers are failing,
+  `/model` → `Worker → <model with a larger window>`.
+- **Proxy hint:** when the upstream error looks context-related, the proxy log
+  and error message include a short note explaining that the full history was sent.
+
+Strict backends also require `content: null` (not `""`) on tool-only assistant
+turns; the proxy handles that automatically.
+
 ### The pre-launch selector doesn't open / says it cannot reach `/uc/select`
 
 - **Proxy not healthy yet or wrong port.** The launcher starts the proxy before

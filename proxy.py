@@ -64,6 +64,10 @@ ENV KNOBS
   UC_MODEL_MAP       optional JSON, e.g. {"claude-opus-4-8":"my-model"}
   UC_LOG             optional log file path (default stderr)
   UC_VERBOSE         default 0
+  UC_BROWSER_UA      User-Agent for openai_compat upstreams (default: modern
+                     Chrome UA). Fixes CF 403 "browser_signature_banned" on
+                     providers like crof.ai. Override with env or per-route
+                     "headers".
 
 ROUTE SHAPE (config.json "routes" object)
 -----------------------------------------
@@ -146,6 +150,16 @@ DIRECTIVES_LOG = os.environ.get("UC_DIRECTIVES_LOG", "0") == "1"
 DIRECTIVES = {"planner": None, "strip": True}   # filled from config in main()
 _ROUTE_ALIASES = {}                              # normalized token -> concrete route id
 
+# BROWSER_UA: browser UA for openai_compat (and classifier) calls.
+# CF-protected providers (e.g. crof.ai) ban Python-urllib (error 1010
+# "browser_signature_banned"). Matches droid/factory clients.
+# Override: UC_BROWSER_UA=... or route "headers".
+BROWSER_UA = os.environ.get(
+    "UC_BROWSER_UA",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+)
+
 # 1M context window: Claude Code sizes its context meter (and auto-compaction) to
 # 1M only when the model id it holds carries a "[1m]" suffix. For a real-Claude
 # passthrough route whose upstream model is 1M-capable, we ADVERTISE the picker id
@@ -185,6 +199,44 @@ def _advertise_id(model_entry):
     if (slot.get("model") or mid) in _CONTEXT_1M_UPSTREAM:
         return mid + _ONEM_SUFFIX
     return mid
+
+
+def _display_name_for_id(mid):
+    if not mid:
+        return None
+    for m in UC_MODELS:
+        if m.get("id") == mid:
+            return m.get("display_name", mid)
+    for m in _stock_models():
+        if m.get("id") == mid:
+            return m.get("display_name", mid)
+    return mid
+
+
+def _orchestrator_worker_status():
+    with _SEL_LOCK:
+        active = dict(_ACTIVE)
+    orch = active.get("orch")
+    worker = active.get("worker")
+    return {
+        "enabled": ORCH_WORKER,
+        "orchestrator": {"id": orch, "display_name": _display_name_for_id(orch)},
+        "worker": {"id": worker, "display_name": _display_name_for_id(worker)},
+        "worker_explicit": active.get("worker_explicit", False),
+        "same_model": bool(orch and worker and orch == worker),
+    }
+
+
+def _context_length_hint(detail):
+    low = (detail or "").lower()
+    if any(x in low for x in ("context", "token", "maximum context",
+                              "too long", "too many tokens", "length exceeded")):
+        return (" (This backend rejected the full conversation history — the proxy "
+                "forwards the entire transcript with no trimming. Try compacting the "
+                "session, switching to a backend with a larger context window, or "
+                "starting a fresh session.)")
+    return ""
+
 
 try:
     UC_MODEL_MAP = json.loads(os.environ.get("UC_MODEL_MAP", "") or "{}")
@@ -1288,10 +1340,14 @@ def anthropic_to_openai(body: dict) -> dict:
                             "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
                         },
                     })
-            entry = {"role": "assistant", "content": "\n".join(p for p in text_parts if p)}
+            text = "\n".join(p for p in text_parts if p)
+            entry = {"role": "assistant"}
             if tool_calls:
                 entry["tool_calls"] = tool_calls
+                entry["content"] = text if text else None
                 pending_tool_ids[:] = [tc["id"] for tc in tool_calls]
+            else:
+                entry["content"] = text
             messages.append(entry)
             continue
 
@@ -1736,7 +1792,8 @@ def _classifier_complete(slot, system_prompt, user_content, timeout):
                 payload[bk] = _expand_env(bv) if isinstance(bv, str) else bv
         data = json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json", "Accept": "application/json",
-                   "Content-Length": str(len(data))}
+                   "Content-Length": str(len(data)), "User-Agent": BROWSER_UA,
+                   "Accept-Language": "en-US,en;q=0.9"}
         auth = slot.get("auth")
         if auth and auth != "passthrough":
             Handler._apply_auth_header(headers, auth)
@@ -1757,7 +1814,7 @@ def _classifier_complete(slot, system_prompt, user_content, timeout):
                "messages": [{"role": "user", "content": user_content}]}
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Content-Length": str(len(data)),
-               "anthropic-version": "2023-06-01"}
+               "anthropic-version": "2023-06-01", "User-Agent": BROWSER_UA}
     auth = slot.get("auth")
     if auth and auth != "passthrough":
         Handler._apply_auth_header(headers, auth)
@@ -1960,6 +2017,7 @@ class Handler(BaseHTTPRequestHandler):
                     "candidates": [{"id": c["id"], "cost": c.get("cost")}
                                    for c in _router_available_candidates()],
                 },
+                "orchestrator_worker": _orchestrator_worker_status(),
                 "custom_models": [{"id": _advertise_id(m), "display_name": m["display_name"]}
                                   for m in UC_MODELS],
                 "stock_models": [{"id": m["id"], "display_name": m["display_name"]}
@@ -2041,6 +2099,7 @@ class Handler(BaseHTTPRequestHandler):
         fwd_headers = {k: v for k, v in self.headers.items()
                        if k.lower() not in _HOP_BY_HOP}
         fwd_headers["Accept-Encoding"] = "identity"
+        fwd_headers.setdefault("User-Agent", BROWSER_UA)
         url = UPSTREAM + self.path
         base = {"data": [], "has_more": False, "first_id": None, "last_id": None}
         try:
@@ -2126,6 +2185,7 @@ class Handler(BaseHTTPRequestHandler):
         for hk, hv in (route.get("headers") or {}).items():
             fwd_headers[hk] = hv
         fwd_headers["Accept-Encoding"] = "identity"
+        fwd_headers.setdefault("User-Agent", BROWSER_UA)
         if body:
             fwd_headers["Content-Length"] = str(len(body))
         req = urllib.request.Request(url, data=body or None,
@@ -2183,6 +2243,8 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if want_stream else "application/json",
             "Content-Length": str(len(payload)),
+            "User-Agent": BROWSER_UA,
+            "Accept-Language": "en-US,en;q=0.9",
         }
         auth_override = route.get("auth")
         if auth_override and auth_override != "passthrough":
@@ -2204,9 +2266,11 @@ class Handler(BaseHTTPRequestHandler):
                     detail = e.read().decode("utf-8", "replace")[:800]
                 except Exception:
                     pass
+                hint = _context_length_hint(detail)
                 log("openai_compat upstream HTTP %s for %s: %s" % (e.code, url, detail))
                 yield {"type": "error", "status": e.code,
-                       "message": "openai_compat upstream %s: %s" % (e.code, detail)}
+                       "message": "openai_compat upstream %s: %s%s"
+                       % (e.code, detail, hint)}
                 return
             except Exception as e:
                 log("openai_compat upstream error %s for %s" % (e, url))

@@ -492,6 +492,20 @@ def main():
             _saved[0], _saved[1], _saved[2], _saved[3])
         print("[ok] routing directives: opt-in default-off / NL opt-in / surgical strip / planner-gated / gpt-collision / dispatch / [1m] strip + advertise")
 
+        # issue #14: tool-only assistant turns must use content=null (not "") for
+        # strict OpenAI-compat backends on long multi-tool transcripts.
+        oai_tool_only = up.anthropic_to_openai({"model": "x", "messages": [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1",
+                                                "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1",
+                                           "content": "ok"}]},
+        ]})
+        assert oai_tool_only["messages"][0]["content"] is None
+        assert oai_tool_only["messages"][0]["tool_calls"]
+        assert up._context_length_hint("context length exceeded") != ""
+        assert up._context_length_hint("unrelated error") == ""
+        print("[ok] openai_compat long-context hygiene: tool-only content=null + context hint")
+
         # issue #3: a rejected tool call (with or without a comment) must not leave
         # an assistant tool_calls message unanswered, and tool replies must come
         # BEFORE the user's text — otherwise strict backends (DeepSeek) 400 with

@@ -141,6 +141,17 @@ Selection rules:
   background traffic) never change the selection; they're **remapped** to it. That
   is what makes "use MiniMax" mean MiniMax for the whole workflow.
 
+**Seeing the active tiers.** Claude Code's UI doesn't show orchestrator vs worker
+separately. While the proxy is running:
+
+- `ultracode status` (or `.\windows\Start-UltraCode.ps1 -Status` on Windows)
+- `GET /healthz` → `orchestrator_worker`
+- `GET /uc/select` → `active`
+
+If a worker model hits a rate limit mid-task, pick **`Worker → <other>`** in
+`/model` — only the worker tier changes. Role-targeted slash commands like
+`/model worker` are not available (that's Claude Code's picker, not the proxy).
+
 The selection lives in the proxy process (one `claude` session), guarded by a
 lock, and resets when the proxy restarts. Disable tier routing with
 `UC_ORCH_WORKER=0` (then a pick routes 1:1 and stock ids pass through untouched).
