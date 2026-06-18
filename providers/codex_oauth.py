@@ -37,6 +37,7 @@ ENV KNOBS
 import base64
 import json
 import os
+import shlex
 import subprocess
 import time
 import urllib.request
@@ -80,6 +81,11 @@ def _load_auth() -> dict:
 
 
 def _decode_jwt_claims(token: str) -> dict:
+    # Best-effort, UNVERIFIED decode of the JWT payload. We only read non-secret
+    # routing hints from our OWN locally-stored Codex token (the account id and
+    # the exp used to decide when to nudge a refresh) -- never an authorization
+    # decision -- so a signature check would add a crypto dependency for no
+    # security gain. The token's authority is enforced upstream by Codex. (#27)
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
@@ -106,8 +112,16 @@ def _best_effort_refresh() -> None:
     if not REFRESH_CMD:
         return
     try:
-        subprocess.run(REFRESH_CMD.split(), timeout=25,
-                       capture_output=True, check=False)
+        # shlex.split honors quoting/escapes so a refresh command with a quoted
+        # path or argument (e.g. "/opt/My Tools/codex" login status) isn't split
+        # on the spaces inside the quotes. posix=False on Windows. (#27)
+        argv = shlex.split(REFRESH_CMD, posix=(os.name != "nt"))
+    except ValueError:
+        argv = REFRESH_CMD.split()
+    if not argv:
+        return
+    try:
+        subprocess.run(argv, timeout=25, capture_output=True, check=False)
     except Exception:
         pass
 

@@ -83,6 +83,14 @@ if (Test-Path $EnvFile) {
 # ----- state dir + session settings -----------------------------------------
 $StateDir = Join-Path $env:LOCALAPPDATA "UltraCode-Shim"
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+# The state dir holds this session's settings (which embed ANTHROPIC_BASE_URL),
+# the proxy pid/log and the saved global model. Lock it to the current user so
+# another local account can't read it or swap in a rogue ANTHROPIC_BASE_URL.
+# Best-effort: never fail the launch over an ACL hiccup. (issue #25)
+try {
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    & icacls $StateDir /inheritance:r /grant:r "${me}:(OI)(CI)F" 2>$null | Out-Null
+} catch {}
 $Settings = Join-Path $StateDir "ultracode_settings.json"
 $BaseUrl  = "http://127.0.0.1:$Port"
 
@@ -122,6 +130,10 @@ $env:UC_CONFIG      = $Config
 $env:UC_LISTEN_PORT = "$Port"
 $env:UC_UPSTREAM    = $Upstream
 $env:UC_LOG         = Join-Path $StateDir "ultracode_proxy.log"
+# Persist the orchestrator/worker pick so it survives a proxy restart; otherwise
+# a restarted proxy forgets the selection and workflow sub-agents fall back to
+# stock Claude. (issue #18)
+$env:UC_SELECTION_CACHE = Join-Path $StateDir "selection.json"
 
 # ----- shared-proxy lifecycle (reference-counted across sessions) -----------
 # Several UltraCode sessions reuse one proxy on this port. Track live users with
@@ -230,7 +242,7 @@ if ($Status) {
         Write-Host ("  Orchestrator: {0} ({1})" -f $ow.orchestrator.display_name, $ow.orchestrator.id)
         Write-Host ("  Worker:       {0} ({1})" -f $ow.worker.display_name, $ow.worker.id)
         if ($ow.worker_explicit) {
-            Write-Host "  (worker set explicitly — plain /model picks change orchestrator only)"
+            Write-Host "  (worker set explicitly -- plain /model picks change orchestrator only)"
         } elseif ($ow.same_model) {
             Write-Host "  (same model runs orchestrator and all workers)"
         }

@@ -103,13 +103,14 @@ ROUTE SHAPE (config.json "routes" object)
            of the visible answer.
 """
 
+import hashlib
 import json
 import os
 import re
 import sys
+import threading
 import time
 import uuid
-import threading
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -129,6 +130,46 @@ INCLUDE_STOCK_MODELS = os.environ.get("UC_INCLUDE_STOCK_MODELS", "1") != "0"
 LEARN_STOCK_MODELS = os.environ.get("UC_STOCK_LEARN", "1") != "0"
 VERBOSE = os.environ.get("UC_VERBOSE", "0") == "1"
 _LOG_PATH = os.environ.get("UC_LOG", "")
+
+# --- Security & resource limits (issues #19, #22, #24) ------------------------
+# Loopback Host-header guard: when bound to a loopback address (the default), the
+# proxy serves only requests whose Host header is a loopback name. This blocks
+# DNS-rebinding -- a malicious web page can't make a victim's browser read the
+# backend config off /healthz or flip routing via /uc/select, because fetch()
+# can't forge the Host header and the rebound hostname isn't loopback. Bind a
+# non-loopback UC_LISTEN_HOST (LAN sharing) to opt out. (#19)
+GUARD_LOCAL = os.environ.get("UC_GUARD_LOCAL", "1") != "0"
+# Reject request bodies larger than this many bytes before allocating them
+# (0 disables). Caps memory blowup from a single oversized upload. (#24)
+MAX_BODY_BYTES = int(os.environ.get("UC_MAX_BODY_BYTES", str(64 * 1024 * 1024)))
+# Cap concurrent in-flight requests so a connection flood can't spawn unbounded
+# threads; excess connections wait for a slot (back-pressure). 0 disables. (#24)
+MAX_CONNECTIONS = int(os.environ.get("UC_MAX_CONNECTIONS", "128"))
+# Per-socket timeout (seconds) bounds idle / slowloris connections. Generous so
+# it never trips an actively streaming response (each chunk resets it). (#24)
+SOCKET_TIMEOUT = float(os.environ.get("UC_SOCKET_TIMEOUT", "660"))
+# Inbound credentials never forwarded to a non-default, non-passthrough upstream
+# (so a custom route can't exfiltrate Claude Code's own Anthropic key). (#22)
+_INBOUND_CRED_HEADERS = ("authorization", "x-api-key")
+
+
+def _is_loopback_listen() -> bool:
+    h = LISTEN_HOST.strip().lower()
+    return h in ("localhost", "127.0.0.1", "::1") or h.startswith("127.")
+
+
+def _request_host_is_local(host_header) -> bool:
+    """True if the inbound Host header names a loopback address. Handles
+    host:port, bracketed IPv6 ([::1]:8141), and bare hostnames."""
+    if not host_header:
+        return False
+    h = host_header.strip()
+    if h.startswith("["):                       # [::1] or [::1]:port
+        h = h[1:].split("]", 1)[0]
+    elif h.count(":") == 1:                      # host:port (not bare IPv6)
+        h = h.rsplit(":", 1)[0]
+    h = h.strip().lower()
+    return h in ("localhost", "127.0.0.1", "::1") or h.startswith("127.")
 
 # Auto Router knobs (see the "router" section in config.json + docs/AUTO_ROUTER.md).
 ROUTER_ENABLED_ENV = os.environ.get("UC_ROUTER", "1") != "0"
@@ -326,7 +367,11 @@ def _routes_to_slots(routes):
         if route.get("upstream"):
             slot["upstream"] = _expand_env(route["upstream"]).rstrip("/")
         auth = route.get("auth")
-        if auth and auth != "passthrough":
+        if auth == "passthrough":
+            # Keep the passthrough intent on the slot so dispatch knows to forward
+            # Claude Code's own credential to this upstream (vs. stripping it). (#22)
+            slot["auth_passthrough"] = True
+        elif auth:
             slot["auth"] = _expand_env(auth)
         if route.get("type"):
             slot["type"] = route["type"]
@@ -639,6 +684,73 @@ _SEL_LOCK = threading.Lock()
 _ACTIVE = {"orch": None, "worker": None, "worker_explicit": False}
 _ORCH_PICK_IDS = set()   # base orchestrator picker ids (filled in main())
 _WORKER_MAP = {}         # claude-worker-<x> -> claude-<x>  (filled in main())
+_WARNED_NO_SELECTION = False
+
+
+def _selection_cache_path() -> str:
+    """Where the sticky orchestrator/worker selection is persisted, or "" to
+    disable. Set by the launchers (UC_SELECTION_CACHE) so the pick survives a
+    proxy restart -- otherwise a restarted proxy forgets the selection and
+    workflow sub-agents silently fall back to stock Claude. (issue #18)"""
+    return os.environ.get("UC_SELECTION_CACHE", "").strip()
+
+
+def _save_selection() -> None:
+    path = _selection_cache_path()
+    if not path:
+        return
+    try:
+        with _SEL_LOCK:
+            data = {"orch": _ACTIVE["orch"], "worker": _ACTIVE["worker"],
+                    "worker_explicit": _ACTIVE["worker_explicit"]}
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        vlog("selection persist failed: %s" % e)
+
+
+def _load_selection() -> None:
+    path = _selection_cache_path()
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        vlog("selection restore failed: %s" % e)
+        return
+    if not isinstance(data, dict):
+        return
+    with _SEL_LOCK:
+        _ACTIVE["orch"] = data.get("orch") or None
+        _ACTIVE["worker"] = data.get("worker") or None
+        _ACTIVE["worker_explicit"] = bool(data.get("worker_explicit"))
+    if _ACTIVE["orch"] or _ACTIVE["worker"]:
+        log("restored orchestrator/worker selection: orch=%s worker=%s"
+            % (_ACTIVE["orch"], _ACTIVE["worker"]))
+
+
+def _has_active_selection() -> bool:
+    with _SEL_LOCK:
+        return bool(_ACTIVE["orch"] or _ACTIVE["worker"])
+
+
+def _warn_no_selection_once(model) -> None:
+    """Explain (once) why traffic is using stock Claude: orchestrator/worker is on
+    but nothing is selected yet, so a stock/unknown id passes through unchanged.
+    This is the most common cause of "workflows ignore my models". (issue #18)"""
+    global _WARNED_NO_SELECTION
+    if _WARNED_NO_SELECTION:
+        return
+    _WARNED_NO_SELECTION = True
+    log("orchestrator/worker is ON but no model is selected yet; request for '%s' "
+        "is passing through as stock Claude. Pick a model in the pre-launch "
+        "selector or via /model so workflow sub-agents use it. (issue #18)" % model)
 
 
 def _request_tier(body: dict) -> str:
@@ -667,7 +779,9 @@ def _set_selection(orch=None, worker=None):
             _ACTIVE["worker_explicit"] = bool(worker)
         if orch and worker is None and not _ACTIVE["worker_explicit"]:
             _ACTIVE["worker"] = orch
-        return dict(_ACTIVE)
+        active = dict(_ACTIVE)
+    _save_selection()
+    return active
 
 
 def _select_target(mid, tier: str):
@@ -678,17 +792,22 @@ def _select_target(mid, tier: str):
     if not ORCH_WORKER:
         return mid
     mid = _strip_1m(mid)   # a [1m]-suffixed pick maps to its clean route id
+    picked = False
     with _SEL_LOCK:
         if mid in _WORKER_MAP:
             _ACTIVE["worker"] = _WORKER_MAP[mid]
             _ACTIVE["worker_explicit"] = True
+            picked = True
         elif mid in _ORCH_PICK_IDS:
             _ACTIVE["orch"] = mid
             if not _ACTIVE["worker_explicit"]:
                 _ACTIVE["worker"] = mid
+            picked = True
         # else: stock (opus/sonnet/haiku) or unknown id -> not a selection.
         orch = _ACTIVE["orch"]
         worker = _ACTIVE["worker"]
+    if picked:
+        _save_selection()   # persist deliberate /model picks across restarts (#18)
     target = (orch or worker) if tier == "heavy" else (worker or orch)
     return target or mid
 
@@ -1006,6 +1125,12 @@ def transform_messages_body(raw: bytes):
     if routed_id != model_before:
         body["model"] = routed_id
         changed = True
+    elif (ORCH_WORKER and not _has_active_selection()
+          and routed_id not in UC_SLOT_MAP):
+        # Selection is on but empty AND this id has no route -> it will pass
+        # through as stock Claude. Surface why (once) so a lost/never-made pick
+        # doesn't look like the workflow silently ignoring the chosen model. (#18)
+        _warn_no_selection_once(routed_id)
     if TIER_LOG:
         remap = ("%s->%s" % (model_before, routed_id)) if routed_id != model_before else (model_before or "-")
         log("tier=%s model=%s" % (tier, remap))
@@ -1060,8 +1185,12 @@ def transform_messages_body(raw: bytes):
         if up:
             route["upstream"] = up.rstrip("/")
         auth = slot.get("auth")
-        if auth and auth != "passthrough":
+        if auth:
             route["auth"] = auth
+        if slot.get("auth_passthrough"):
+            # User explicitly opted to forward Claude Code's own credential to
+            # this upstream; otherwise inbound creds are stripped at dispatch. (#22)
+            route["auth_passthrough"] = True
         stype = slot.get("type")
         if stype:
             route["type"] = stype
@@ -1866,7 +1995,11 @@ def _router_pick(scores, candidates, threshold, has_images):
 
 
 def _router_cache_key(signal, tier):
-    return "%s|%s" % (tier, hash(signal["task"]))
+    # Stable across process restarts: Python's builtin hash() is salted per run
+    # (PYTHONHASHSEED), so it would mint a different key for the same task every
+    # restart, silently defeating the cache and re-running the classifier. (#20)
+    digest = hashlib.sha256(signal["task"].encode("utf-8", "replace")).hexdigest()
+    return "%s|%s" % (tier, digest[:32])
 
 
 def _router_fallback_id(candidates):
@@ -1994,6 +2127,7 @@ _HOP_BY_HOP = {
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ultracode-proxy/2.0"
+    timeout = SOCKET_TIMEOUT if SOCKET_TIMEOUT > 0 else None  # bound idle sockets (#24)
 
     def log_message(self, fmt, *args):
         if VERBOSE:
@@ -2034,7 +2168,24 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return False
 
+    def _guard_local(self) -> bool:
+        """When bound to loopback, serve only loopback-origin requests (anti
+        DNS-rebinding). Returns True if allowed; sends 403 and returns False
+        otherwise. A non-loopback UC_LISTEN_HOST opts out. (#19)"""
+        if not (GUARD_LOCAL and _is_loopback_listen()):
+            return True
+        if _request_host_is_local(self.headers.get("Host")):
+            return True
+        self.close_connection = True
+        self._raw(403, "application/json", json.dumps(
+            {"type": "error", "error": {"type": "forbidden",
+             "message": "ultracode-proxy: refusing non-local Host header "
+                        "(proxy is bound to loopback)"}}).encode("utf-8"))
+        return False
+
     def do_GET(self):
+        if not self._guard_local():
+            return
         if self._maybe_health():
             return
         if self.path.split("?")[0] == "/uc/select":
@@ -2045,6 +2196,8 @@ class Handler(BaseHTTPRequestHandler):
         self._proxy("GET")
 
     def do_POST(self):
+        if not self._guard_local():
+            return
         if self.path.split("?")[0] == "/uc/select":
             self._handle_uc_select_post()
             return
@@ -2067,6 +2220,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_uc_select_post(self):
         body = self._read_body()
+        if body is None:
+            return
         try:
             data = json.loads(body.decode("utf-8")) if body else {}
         except Exception as e:
@@ -2082,9 +2237,13 @@ class Handler(BaseHTTPRequestHandler):
                   json.dumps({"ok": True, "active": active}).encode("utf-8"))
 
     def do_PUT(self):
+        if not self._guard_local():
+            return
         self._proxy("PUT")
 
     def do_DELETE(self):
+        if not self._guard_local():
+            return
         self._proxy("DELETE")
 
     # ---- /v1/models discovery -------------------------------------------
@@ -2145,7 +2304,10 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     # ---- core proxy ------------------------------------------------------
-    def _read_body(self) -> bytes:
+    def _read_body(self):
+        """Read the request body, or None if it was rejected (a response was
+        already sent). Bodies above MAX_BODY_BYTES are refused before allocation
+        so a single oversized upload can't exhaust memory. (#24)"""
         length = self.headers.get("Content-Length")
         if length is None:
             return b""
@@ -2153,10 +2315,21 @@ class Handler(BaseHTTPRequestHandler):
             n = int(length)
         except ValueError:
             return b""
-        return self.rfile.read(n) if n > 0 else b""
+        if n <= 0:
+            return b""
+        if MAX_BODY_BYTES and n > MAX_BODY_BYTES:
+            self.close_connection = True
+            self._raw(413, "application/json", json.dumps(
+                {"type": "error", "error": {"type": "payload_too_large",
+                 "message": "ultracode-proxy: request body of %d bytes exceeds "
+                            "the %d-byte limit" % (n, MAX_BODY_BYTES)}}).encode("utf-8"))
+            return None
+        return self.rfile.read(n)
 
     def _proxy(self, method: str):
         body = self._read_body()
+        if body is None:
+            return
         is_messages = self.path.split("?")[0].endswith("/v1/messages")
         route = {}
         if is_messages and method == "POST" and body:
@@ -2179,6 +2352,11 @@ class Handler(BaseHTTPRequestHandler):
         url = upstream + self.path
         fwd_headers = {k: v for k, v in self.headers.items()
                        if k.lower() not in _HOP_BY_HOP}
+        # Don't leak Claude Code's own Anthropic credential to a custom upstream
+        # unless the route explicitly opts into passthrough auth. (#22)
+        if upstream != UPSTREAM and not route.get("auth_passthrough"):
+            for hk in [h for h in fwd_headers if h.lower() in _INBOUND_CRED_HEADERS]:
+                del fwd_headers[hk]
         auth_override = route.get("auth")
         if auth_override:
             self._apply_auth_header(fwd_headers, auth_override)
@@ -2188,6 +2366,17 @@ class Handler(BaseHTTPRequestHandler):
         fwd_headers.setdefault("User-Agent", BROWSER_UA)
         if body:
             fwd_headers["Content-Length"] = str(len(body))
+        # For a streaming /v1/messages turn, surface a transport-level failure
+        # (timeout, connection refused) as visible assistant text instead of an
+        # opaque error Claude Code can't render. (#18)
+        want_stream, surface_id = False, None
+        if is_messages and method == "POST" and body:
+            try:
+                _b = json.loads(body.decode("utf-8"))
+                want_stream = bool(_b.get("stream", False))
+                surface_id = _b.get("model")
+            except Exception:
+                pass
         req = urllib.request.Request(url, data=body or None,
                                      headers=fwd_headers, method=method)
         try:
@@ -2197,7 +2386,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         except Exception as e:
             log("upstream error %s for %s" % (e, url))
-            self._send_error(502, str(e))
+            msg = "upstream error talking to %s: %s" % (upstream, e)
+            if is_messages and method == "POST":
+                self._emit_or_error(want_stream, surface_id or "claude", 502, msg)
+            else:
+                self._send_error(502, msg)
             return
         ctype = resp.headers.get("Content-Type", "")
         self._relay_response(resp, streaming="text/event-stream" in ctype)
@@ -2541,6 +2734,32 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that caps simultaneous handler threads so a connection
+    flood can't exhaust memory / file descriptors. Excess connections block in
+    the accept loop until a slot frees up (back-pressure), rather than each
+    spawning an unbounded thread. (#24)"""
+    daemon_threads = True
+    _slots = threading.BoundedSemaphore(MAX_CONNECTIONS) if MAX_CONNECTIONS > 0 else None
+
+    def process_request(self, request, client_address):
+        if self._slots is not None:
+            self._slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            if self._slots is not None:
+                self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            if self._slots is not None:
+                self._slots.release()
+
+
 def main():
     global UC_SLOT_MAP, UC_MODELS, LISTEN_PORT, UPSTREAM, MAX_TOKENS_FLOOR, ROUTER
     global INCLUDE_STOCK_MODELS, LEARN_STOCK_MODELS
@@ -2574,6 +2793,7 @@ def main():
     UC_MODELS = _models_from_config(cfg.get("models"))
     _configure_router(cfg.get("router"))
     _wire_orchestrator_worker()
+    _load_selection()   # restore a persisted orchestrator/worker pick (#18)
     _load_learned_stock()
     stock = _stock_models()
     if stock:
@@ -2612,7 +2832,7 @@ def main():
                 "using deterministic cheapest-candidate fallback" % ROUTER.get("classifier"))
     elif isinstance(cfg.get("router"), dict) and cfg["router"].get("enabled") and not ROUTER_ENABLED_ENV:
         log("  Auto Router disabled via UC_ROUTER=0")
-    httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    httpd = _BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     log("ultracode-proxy listening on http://%s:%d -> %s"
         % (LISTEN_HOST, LISTEN_PORT, UPSTREAM))
     log("effort=%s thinking=%s max_tokens_floor=%d inject_reminder=%s"
