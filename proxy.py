@@ -403,6 +403,49 @@ def _models_from_config(models):
     return out
 
 
+def _normalize_model_key(mid):
+    """Normalize a model id for fuzzy matching: strip 'claude-' prefix, strip
+    trailing date version like -202606 or -20260601, lowercase, remove delimiters.
+    So 'deepseek-v4-pro-202606', 'claude-deepseek-v4-pro', and 'deepseek-v4-pro'
+    all collapse to 'deepseekv4pro'."""
+    if not isinstance(mid, str):
+        return ""
+    s = mid.lower()
+    if s.startswith("claude-"):
+        s = s[len("claude-"):]
+    s = re.sub(r'-\d{6,8}$', '', s)       # strip date suffix: deepseek-v4-pro-202606
+    s = re.sub(r'[^a-z0-9]', '', s)       # strip delimiters: deepseek-v4-pro
+    return s
+
+
+def _find_route_slot(model_id):
+    """Resolve model_id to a configured route slot dict.
+
+    Claude Code may send model IDs that don't EXACTLY match a route key:
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek-v4-pro-202606 (bare name, dated)
+      - /model picker returns claude-deepseek-v4-pro (prefixed, unversioned)
+      - Claude Code settings may pass deepseek-v4-pro (bare, unversioned)
+
+    All three should resolve to the SAME route entry. This function tries exact
+    match first (fast path, preserves existing behaviour), then falls back to
+    normalized matching so a single route key covers every variant.
+    """
+    if not isinstance(model_id, str) or not model_id:
+        return None
+    # 1. Exact match — fast path, zero overhead for the common case.
+    slot = UC_SLOT_MAP.get(model_id)
+    if slot is not None:
+        return slot
+    # 2. Normalized match — scan route keys, compare after normalization.
+    norm_model = _normalize_model_key(model_id)
+    if not norm_model:
+        return None
+    for key, s in UC_SLOT_MAP.items():
+        if _normalize_model_key(key) == norm_model:
+            return s
+    return None
+
+
 # Stock (real Claude) models. These are advertised on /v1/models in addition to
 # whatever Anthropic's own /v1/models returns, so real Claude never disappears
 # from the /model picker -- e.g. when there's no Anthropic credential to forward
@@ -967,7 +1010,7 @@ def _directive_pin(body):
                 log("[directive] ambiguous (%s named); ignored" % ", ".join(ids))
             return None
         rid = ids[0]
-        slot = UC_SLOT_MAP.get(rid)
+        slot = _find_route_slot(rid)
         if not isinstance(slot, dict) or slot.get("type") == "auto":
             if DIRECTIVES_LOG:
                 log("[directive] '%s' (%s) not a usable backend; ignored" % (rid, tier))
@@ -1131,7 +1174,7 @@ def transform_messages_body(raw: bytes):
         body["model"] = routed_id
         changed = True
     elif (ORCH_WORKER and not _has_active_selection()
-          and routed_id not in UC_SLOT_MAP):
+          and _find_route_slot(routed_id) is None):
         # Selection is on but empty AND this id has no route -> it will pass
         # through as stock Claude. Surface why (once) so a lost/never-made pick
         # doesn't look like the workflow silently ignoring the chosen model. (#18)
@@ -1169,7 +1212,7 @@ def transform_messages_body(raw: bytes):
     # classifier model to score the configured candidates and routes this request
     # to the cheapest one that clears the quality bar. Resolve it to a concrete
     # candidate id, then fall through to that candidate's slot below.
-    slot = UC_SLOT_MAP.get(body.get("model"))
+    slot = _find_route_slot(body.get("model"))
     if isinstance(slot, dict) and slot.get("type") == "auto":
         picked = resolve_auto(body, tier) if _router_is_enabled() else None
         if not picked:
@@ -1181,7 +1224,7 @@ def transform_messages_body(raw: bytes):
                 log("router tier=%s %s -> %s" % (tier, body.get("model"), picked))
             body["model"] = picked
             changed = True
-        slot = UC_SLOT_MAP.get(body.get("model"))
+        slot = _find_route_slot(body.get("model"))
 
     if isinstance(slot, dict) and slot.get("type") != "auto":
         target_model = slot.get("model")
