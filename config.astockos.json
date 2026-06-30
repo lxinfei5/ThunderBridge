@@ -1,0 +1,33 @@
+{
+  "_comment": "ThunderBridge config for AStockOS — passthrough mode (Anthropic-native upstream, no OpenAI translation).",
+  "_usage": "cp config.astockos.json config.json  # then launch with bin/thunderbridge",
+
+  "proxy": {
+    "listen_port": 0,
+    "_listen_port": "0 = OS picks a free port dynamically. Set to e.g. 18141 for fixed.",
+    "anthropic_upstream": "https://tokenhub.tencentmaas.com",
+    "_anthropic_upstream": "Your Anthropic-compatible API gateway. ThunderBridge only injects the UltraCode envelope and forwards.",
+    "max_tokens_floor": 64000,
+    "include_stock_models": false,
+    "learn_stock_models": false
+  },
+
+  "models": [
+    {
+      "id": "claude-deepseek",
+      "display_name": "DeepSeek V4 Pro (UltraCode)"
+    }
+  ],
+
+  "routes": {
+    "claude-deepseek": {
+      "_type": "omitted = Anthropic passthrough. No protocol translation — envelope injection only.",
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough",
+      "_auth_passthrough": "Forwards Claude Code's own x-api-key header unchanged."
+    }
+  },
+
+  "_extending": "To add more models (e.g., a cheaper worker for sub-agents): add an entry to 'models' and 'routes' with type 'openai_compat' for OpenAI-format backends, or omit 'type' for Anthropic passthrough. Then you get orchestrator/worker model separation."
+}

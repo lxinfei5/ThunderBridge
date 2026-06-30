@@ -2833,8 +2833,19 @@ def main():
     elif isinstance(cfg.get("router"), dict) and cfg["router"].get("enabled") and not ROUTER_ENABLED_ENV:
         log("  Auto Router disabled via UC_ROUTER=0")
     httpd = _BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
-    log("ultracode-proxy listening on http://%s:%d -> %s"
-        % (LISTEN_HOST, LISTEN_PORT, UPSTREAM))
+    # When LISTEN_PORT is 0, the OS allocates a free port. Write it so the
+    # launcher can discover the actual port (dynamic allocation for worktree
+    # safety — no port conflicts across concurrent sessions).
+    actual_port = httpd.server_port
+    port_file = os.environ.get("UC_PORT_FILE", "")
+    if port_file:
+        try:
+            with open(port_file, "w") as f:
+                f.write(str(actual_port))
+        except OSError:
+            pass
+    log("thunderbridge-proxy listening on http://%s:%d -> %s"
+        % (LISTEN_HOST, actual_port, UPSTREAM))
     log("effort=%s thinking=%s max_tokens_floor=%d inject_reminder=%s"
         % (FORCE_EFFORT, FORCE_THINKING, MAX_TOKENS_FLOOR, INJECT_REMINDER))
     try:

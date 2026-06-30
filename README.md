@@ -1,45 +1,44 @@
 <p align="center">
-  <img src="assets/brand/hero.png" alt="UltraCode-Shim — run Claude Code's UltraCode mode on any model you already pay for" width="100%">
+  <h1>⚡ ThunderBridge</h1>
+  <p><em>Bridge Claude Code's UltraCode mode to any model — with the speed of thunder.</em></p>
 </p>
 
 <p align="center">
-  <a href="https://github.com/OnlyTerp/UltraCode-Shim/actions/workflows/ci.yml"><img src="https://github.com/OnlyTerp/UltraCode-Shim/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-8b5cf6.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/python-3.8%2B-6366f1" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/deps-stdlib%20only-a855f7" alt="deps: stdlib only">
   <img src="https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-c026d3" alt="platforms">
 </p>
 
+> **Forked from [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim)** by OnlyTerp — the original breakthrough. ThunderBridge extends it with passthrough-first defaults, dynamic port allocation, and AStockOS-native integration.
+
 Use Claude Code's **UltraCode** mode (xhigh effort + the Workflow/deep-reasoning
 harness) with **any model you already pay for** — pick it live from the `/model`
 menu.
 
-One icon. Open Claude Code, type `/model`, and choose any backend you've set up —
+One command. Open Claude Code, type `/model`, and choose any backend you've set up —
 all running with the full UltraCode harness. Your normal Claude Code install is
 left untouched.
 
 The example config ships ready-to-use entries for **GPT‑5.5 (Codex login)**,
 **MiniMax‑M3**, **MiMo v2.5 Pro**, **DeepSeek V4 Pro/Flash**, **Step Flash**,
 **Ollama Cloud**, **OpenCode Go**, **OpenRouter**, and **local models** — keep
-the ones you have a plan for, delete the rest. (Cursor's Composer needs the
-`cursor-agent` CLI and isn't HTTP-based — see
-[docs/ADD_A_MODEL.md](docs/ADD_A_MODEL.md).)
-
-<p align="center">
-  <img src="assets/brand/features.png" alt="One icon, every model · stdlib-only proxy · tools translated both ways · your Claude stays untouched" width="100%">
-</p>
+the ones you have a plan for, delete the rest.
 
 ## How it works
-
-<p align="center">
-  <img src="assets/brand/architecture.png" alt="Claude Code's /model menu points at a loopback proxy that adds the UltraCode envelope and routes each pick to the backend you already pay for" width="100%">
-</p>
 
 > **How is this possible?** At the API level, "UltraCode" is just
 > `effort=xhigh` + adaptive thinking + a big `max_tokens` + one system reminder —
 > there is no secret model. The proxy adds that envelope to every request, so any
 > backend gets the UltraCode treatment. Full breakdown (with the reverse‑engineering
 > evidence) in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+
+### Passthrough Mode (default in ThunderBridge)
+
+When your upstream already speaks Anthropic Messages API natively (e.g., Tencent
+Maas, Anthropic-compatible gateways), ThunderBridge runs in **passthrough mode** —
+zero protocol translation, just envelope injection. No OpenAI translation layer,
+no tool-call repair overhead. See `config.astockos.json` for an example.
 
 ## Orchestrator + Worker: two models, one workflow 🪄
 

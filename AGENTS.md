@@ -1,6 +1,6 @@
 # Runbook for AI assistants
 
-You are helping a user set up **UltraCode-Shim**: it lets Claude Code's UltraCode
+You are helping a user set up **ThunderBridge**: it lets Claude Code's UltraCode
 mode run on any model the user already pays for, chosen from the pre-launch
 orchestrator/worker selector or from the `/model` menu.
 
@@ -35,9 +35,9 @@ self-test, creates `config.json`, and installs a `ultracode` launcher on PATH):
 
 ```
 # mac/linux/WSL
-curl -fsSL https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lxinfei5/ThunderBridge/main/install.sh | bash
 # windows (PowerShell)
-irm https://raw.githubusercontent.com/OnlyTerp/UltraCode-Shim/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/lxinfei5/ThunderBridge/main/install.ps1 | iex
 ```
 
 If you already have a checkout, run `./install.sh` (or `.\install.ps1`) from
@@ -45,7 +45,7 @@ inside it. Either way, the installer runs the **offline self-test** for you.
 
 If you'd rather do it by hand (or the installer can't run):
 
-1. Clone if not already: `git clone https://github.com/OnlyTerp/UltraCode-Shim.git`
+1. Clone if not already: `git clone https://github.com/lxinfei5/ThunderBridge.git`
 2. From the repo root run the doctor:
    ```
    python3 scripts/doctor.py

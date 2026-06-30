@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# ThunderBridge launcher — bridge Claude Code UltraCode mode to third-party models.
+#
+# Usage:
+#   bin/thunderbridge                  # interactive (passthrough to ANTHROPIC_BASE_URL upstream)
+#   bin/thunderbridge -p "prompt"      # headless batch (same proxy, same envelope)
+#   bin/thunderbridge --config config.my.json  # custom config
+#
+# What it does:
+#   1. Starts proxy.py on a DYNAMIC PORT (OS picks, no conflict across worktrees/sessions)
+#   2. Injects UltraCode envelope (effort=xhigh + max_tokens=64000 + system reminder)
+#   3. Passes through to your Anthropic-compatible upstream (Maas, etc.) — no protocol translation
+#   4. Cleans up proxy on exit (trap EXIT)
+#
+# Your normal `claude` / `claude -p` is untouched — this is an opt-in wrapper.
+# Worktree-safe: each session gets its own proxy on a unique port.
+#
+# Env vars (all optional — defaults work for AStockOS + Tencent Maas):
+#   THUNDER_CONFIG         path to config.json (default: config.astockos.json → config.json)
+#   THUNDER_UPSTREAM       override anthropic_upstream (default: from config or env ANTHROPIC_BASE_URL)
+#   UC_MAX_TOKENS          override max_tokens_floor (default: 64000)
+set -euo pipefail
+
+# Resolve repo root through symlinks.
+SELF="${BASH_SOURCE[0]}"
+while [ -h "$SELF" ]; do
+  DIR="$(cd -P "$(dirname "$SELF")" && pwd)"
+  SELF="$(readlink "$SELF")"
+  case "$SELF" in /*) ;; *) SELF="$DIR/$SELF" ;; esac
+done
+REPO="$(cd -P "$(dirname "$SELF")/.." && pwd)"
+
+PROXY="$REPO/proxy.py"
+BASE_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/thunderbridge"
+mkdir -p "$BASE_STATE"
+chmod 700 "$BASE_STATE" 2>/dev/null || true
+
+# Config: prefer THUNDER_CONFIG, then config.astockos.json, then config.json.
+CFG="${THUNDER_CONFIG:-}"
+if [ -z "$CFG" ]; then
+  if [ -f "$REPO/config.astockos.json" ]; then
+    CFG="$REPO/config.astockos.json"
+  elif [ -f "$REPO/config.json" ]; then
+    CFG="$REPO/config.json"
+  fi
+fi
+
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "ThunderBridge: Python 3 not found." >&2; exit 1; }
+command -v claude >/dev/null 2>&1 || { echo "ThunderBridge: claude CLI not found — npm i -g @anthropic-ai/claude-code" >&2; exit 1; }
+
+# Resolve upstream: THUNDER_UPSTREAM > config proxy.anthropic_upstream > env ANTHROPIC_BASE_URL > default.
+UPSTREAM="${THUNDER_UPSTREAM:-}"
+if [ -z "$UPSTREAM" ] && [ -f "$CFG" ]; then
+  UPSTREAM="$("$PY" -c "import json,sys;c=json.load(open(sys.argv[1]));print((c.get('proxy') or {}).get('anthropic_upstream',''))" "$CFG" 2>/dev/null || true)"
+fi
+UPSTREAM="${UPSTREAM:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
+
+# Dynamic port: proxy binds port 0 (OS picks), writes actual port to UC_PORT_FILE.
+PORT_FILE="$BASE_STATE/proxy.port"
+PID_FILE="$BASE_STATE/proxy.pid"
+LOG_FILE="$BASE_STATE/proxy.log"
+SELECTION_FILE="$BASE_STATE/selection.json"
+
+# Clean up on exit.
+cleanup() {
+  [ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
+  rm -f "$PID_FILE" "$PORT_FILE"
+}
+trap cleanup EXIT
+
+# Start the proxy on a dynamic port.
+echo "ThunderBridge: starting proxy -> $UPSTREAM"
+UC_CONFIG="$CFG" \
+  UC_LISTEN_PORT=0 \
+  UC_PORT_FILE="$PORT_FILE" \
+  UC_UPSTREAM="$UPSTREAM" \
+  UC_SELECTION_CACHE="$SELECTION_FILE" \
+  "$PY" "$PROXY" >>"$LOG_FILE" 2>&1 &
+PROXY_PID=$!
+echo "$PROXY_PID" > "$PID_FILE"
+
+# Wait for the port file and health check.
+for _ in $(seq 1 40); do
+  if [ -f "$PORT_FILE" ]; then
+    PORT="$(cat "$PORT_FILE")"
+    if "$PY" -c "
+import json,urllib.request
+try:
+    with urllib.request.urlopen('http://127.0.0.1:$PORT/healthz',timeout=2) as r:
+        assert json.loads(r.read()).get('ok')
+except: exit(1)
+" 2>/dev/null; then
+      break
+    fi
+  fi
+  sleep 0.25
+done
+
+if [ ! -f "$PORT_FILE" ]; then
+  echo "ThunderBridge: proxy failed to start. Log:" >&2
+  tail -20 "$LOG_FILE" >&2 || true
+  exit 1
+fi
+
+PORT="$(cat "$PORT_FILE")"
+BASE_URL="http://127.0.0.1:$PORT"
+echo "ThunderBridge: proxy ready on $BASE_URL"
+
+# Note: we DON'T set ANTHROPIC_BASE_URL globally. We use --settings to scope it.
+# That way other claude invocations (outside this launcher) are unaffected.
+
+# Session-scoped settings file (private, carries ANTHROPIC_BASE_URL).
+SETTINGS_FILE="$BASE_STATE/settings.json"
+SETTINGS_TMP="$(umask 077; mktemp "$BASE_STATE/.settings.XXXXXX")"
+cat > "$SETTINGS_TMP" <<JSON
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "$BASE_URL",
+    "CLAUDE_CODE_WORKFLOWS": "1",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  }
+}
+JSON
+chmod 600 "$SETTINGS_TMP" 2>/dev/null || true
+mv -f "$SETTINGS_TMP" "$SETTINGS_FILE"
+
+# Seed the gateway-models cache so /model works immediately.
+CFG_CACHE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/cache"
+mkdir -p "$CFG_CACHE_DIR"
+"$PY" - "$CFG_CACHE_DIR/gateway-models.json" "$BASE_URL" <<'PY' || true
+import json,os,sys,time,urllib.request
+cache_f, base = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(base.rstrip('/')+'/healthz',timeout=2) as r:
+        health = json.loads(r.read().decode('utf-8'))
+    models = []
+    seen = set()
+    for key in ('stock_models','custom_models'):
+        for m in health.get(key) or []:
+            if isinstance(m,dict) and m.get('id') and m['id'] not in seen:
+                seen.add(m['id'])
+                models.append({'id':m['id'],'display_name':m.get('display_name',m['id'])})
+    json.dump({'baseUrl':base,'fetchedAt':int(time.time()*1000),'models':models}, open(cache_f,'w'))
+except: pass
+PY
+
+echo "ThunderBridge: launching Claude Code (UltraCode envelope active)"
+echo "  Proxy:     $BASE_URL -> $UPSTREAM"
+echo "  Envelope:  effort=xhigh, max_tokens>=64000, thinking=adaptive"
+echo "  /model:    use to switch models; your global claude is untouched"
+echo ""
+
+# Launch Claude Code with session-scoped settings.
+# All arguments forwarded — works for interactive and `-p` (headless).
+exec claude --settings "$SETTINGS_FILE" "$@"
