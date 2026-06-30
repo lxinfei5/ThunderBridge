@@ -1,0 +1,36 @@
+{
+  "_comment": "ThunderBridge config — DeepSeek API direct access (Anthropic-native, no Maas gateway needed).",
+  "_usage": "cp config.deepseek.json config.json  # then launch with bin/thunderbridge",
+  "_prereq": "export DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+
+  "proxy": {
+    "listen_port": 0,
+    "_listen_port": "0 = OS picks a free port dynamically. Worktree-safe.",
+    "anthropic_upstream": "https://api.deepseek.com/anthropic",
+    "_anthropic_upstream": "DeepSeek's Anthropic-compatible Messages API endpoint.",
+    "max_tokens_floor": 64000,
+    "include_stock_models": false,
+    "learn_stock_models": false
+  },
+
+  "models": [
+    {
+      "id": "claude-deepseek",
+      "display_name": "DeepSeek Chat (UltraCode)"
+    }
+  ],
+
+  "routes": {
+    "claude-deepseek": {
+      "_type_omitted": "passthrough mode: DeepSeek natively speaks Anthropic Messages API. No OpenAI translation layer.",
+      "upstream": "https://api.deepseek.com/anthropic",
+      "model": "deepseek-chat",
+      "auth": "Bearer ${DEEPSEEK_API_KEY}",
+      "_auth_explanation": "NOT 'passthrough' — we set our own DeepSeek key. The proxy strips Claude Code's x-api-key header and replaces it with Authorization: Bearer ${DEEPSEEK_API_KEY}."
+    }
+  },
+
+  "_why_not_passthrough_auth": "Claude Code's x-api-key is your ANTHROPIC_AUTH_TOKEN (Anthropic/Maas key). DeepSeek API needs your DeepSeek key in Authorization: Bearer format. Setting `auth: 'Bearer ${...}'` (instead of 'passthrough') tells the proxy: strip the inbound credential, use this one instead.",
+
+  "_extending": "To add a cheaper worker model: add deepseek-chat (same model) as claude-worker-deepseek, or add deepseek-reasoner for heavy reasoning tasks."
+}
