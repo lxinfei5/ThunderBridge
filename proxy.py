@@ -186,7 +186,8 @@ ROUTER_LOG = os.environ.get("UC_ROUTER_LOG", "0") == "1"
 # existing setup that hasn't asked for it. Final value is resolved in
 # _configure_directives(); this is only the pre-config default. See docs/DIRECTIVES.md.
 DIRECTIVES_ENABLED = os.environ.get("UC_DIRECTIVES") == "1"
-DIRECTIVES_NL = os.environ.get("UC_DIRECTIVES_NL", "0") == "1"   # natural-language tier: opt-in (off by default)
+DIRECTIVES_NL = (os.environ.get("UC_DIRECTIVES_NL", "0") == "1"
+                 )   # natural-language tier: opt-in (off by default)
 DIRECTIVES_LOG = os.environ.get("UC_DIRECTIVES_LOG", "0") == "1"
 DIRECTIVES = {"planner": None, "strip": True}   # filled from config in main()
 _ROUTE_ALIASES = {}                              # normalized token -> concrete route id
@@ -457,7 +458,8 @@ def _stock_cache_path():
     if os.name == "nt":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         return os.path.join(base, "UltraCode-Shim", "stock-models.json")
-    base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    base = (os.environ.get("XDG_STATE_HOME")
+            or os.path.join(os.path.expanduser("~"), ".local", "state"))
     return os.path.join(base, "ultracode-shim", "stock-models.json")
 
 
@@ -861,9 +863,12 @@ def _wire_orchestrator_worker():
 # your model ids + display names (plus router.aliases / directives.aliases
 # overrides). A pin to an unconfigured or "auto" route is ignored so a request is
 # never broken.
-_DIRECTIVE_SENTINEL = re.compile(r"\[\[\s*(?:route|model|use)\s*:\s*([A-Za-z0-9._\-]+)\s*\]\]", re.I)
-_DIRECTIVE_TAG = re.compile(r"(?<![^\s(])(?:@|(?:route|model|use)\s*:\s*)([A-Za-z0-9._\-]+)", re.I)
-_DIRECTIVE_NL = re.compile(r"\b(?:use|using|have|ask|let|route\s+to|via|with)\s+([A-Za-z0-9._\-]+)", re.I)
+_DIRECTIVE_SENTINEL = re.compile(
+    r"\[\[\s*(?:route|model|use)\s*:\s*([A-Za-z0-9._\-]+)\s*\]\]", re.I)
+_DIRECTIVE_TAG = re.compile(
+    r"(?<![^\s(])(?:@|(?:route|model|use)\s*:\s*)([A-Za-z0-9._\-]+)", re.I)
+_DIRECTIVE_NL = re.compile(
+    r"\b(?:use|using|have|ask|let|route\s+to|via|with)\s+([A-Za-z0-9._\-]+)", re.I)
 
 
 def _norm_alias(s):
@@ -1132,7 +1137,9 @@ def transform_messages_body(raw: bytes):
         # doesn't look like the workflow silently ignoring the chosen model. (#18)
         _warn_no_selection_once(routed_id)
     if TIER_LOG:
-        remap = ("%s->%s" % (model_before, routed_id)) if routed_id != model_before else (model_before or "-")
+        remap = (
+            "%s->%s" % (model_before, routed_id)
+        ) if routed_id != model_before else (model_before or "-")
         log("tier=%s model=%s" % (tier, remap))
 
     # Routing directive ("pin"): a prompt tag forces THIS request onto a specific
@@ -1512,7 +1519,9 @@ def anthropic_to_openai(body: dict) -> dict:
             if isinstance(user_content, list):
                 combined = carried + user_content
             elif user_content:  # non-empty string
-                combined = carried + [{"type": "text", "text": user_content}] if carried else user_content
+                combined = (
+                    carried + [{"type": "text", "text": user_content}]
+                ) if carried else user_content
             else:
                 combined = carried
             if combined:
@@ -1853,7 +1862,9 @@ def _router_system_prompt(candidates):
         "Candidate models:",
     ]
     for c in candidates:
-        card = (c.get("card") or "").strip() or "General-purpose model. No capability card provided."
+        card = (
+            (c.get("card") or "").strip()
+            or "General-purpose model. No capability card provided.")
         imgs = "yes" if c.get("supports_images") else "no"
         lines.append("- id: %s" % c["id"])
         lines.append("  images: %s" % imgs)
@@ -2625,10 +2636,12 @@ class Handler(BaseHTTPRequestHandler):
                     if not emitted:
                         if not text_open:
                             open_text()
+                        err_msg = "[ultracode-proxy] " + (
+                            ev.get("message") or "upstream error")
                         self.wfile.write(_sse("content_block_delta", {
                             "type": "content_block_delta", "index": index,
                             "delta": {"type": "text_delta",
-                                      "text": "[ultracode-proxy] " + (ev.get("message") or "upstream error")}}))
+                                      "text": err_msg}}))
                         emitted = True
                     break
             if text_open:
@@ -2822,15 +2835,20 @@ def main():
         log("  cursor_agent helper not importable (cursor_agent routes will 501)")
     if _router_is_enabled():
         avail = _router_available_candidates()
+        cand_str = ", ".join(
+            "%s($%s)" % (c["id"], c.get("cost"))
+            for c in avail) or "(none available)"
         log("  Auto Router ON: id=%s classifier=%s threshold=%.2f candidates=%s"
-            % (ROUTER["id"], ROUTER.get("classifier"), float(ROUTER.get("threshold", 0.7)),
-               ", ".join("%s($%s)" % (c["id"], c.get("cost")) for c in avail) or "(none available)"))
+            % (ROUTER["id"], ROUTER.get("classifier"),
+               float(ROUTER.get("threshold", 0.7)), cand_str))
         if not avail:
             log("  Auto Router WARNING: no candidate backend is configured; it will pass through")
         elif ROUTER.get("classifier") not in UC_SLOT_MAP:
             log("  Auto Router NOTE: classifier '%s' is not a configured route; "
                 "using deterministic cheapest-candidate fallback" % ROUTER.get("classifier"))
-    elif isinstance(cfg.get("router"), dict) and cfg["router"].get("enabled") and not ROUTER_ENABLED_ENV:
+    elif (isinstance(cfg.get("router"), dict)
+          and cfg["router"].get("enabled")
+          and not ROUTER_ENABLED_ENV):
         log("  Auto Router disabled via UC_ROUTER=0")
     httpd = _BoundedThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
     # When LISTEN_PORT is 0, the OS allocates a free port. Write it so the
