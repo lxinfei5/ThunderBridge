@@ -192,4 +192,7 @@ echo "  Proxy:     $BASE_URL -> $UPSTREAM"
 echo "  Envelope:  effort=xhigh, max_tokens>=64000, thinking=adaptive"
 echo ""
 
-exec claude --settings "$SETTINGS_FILE" "$@"
+claude --settings "$SETTINGS_FILE" "$@"
+# exec NOT used — the shell must survive claude so the EXIT trap
+# fires and cleanup() kills the proxy. With exec, bash is replaced
+# by claude and the trap is lost → orphaned proxy process.
