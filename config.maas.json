@@ -1,0 +1,38 @@
+{
+  "_comment": "ThunderBridge config — Tencent Cloud MAAS DeepSeek (Anthropic-compatible gateway, passthrough auth).",
+  "_usage": "thunderbridge --profile maas",
+  "_prereq": "ANTHROPIC_AUTH_TOKEN must be set to your Tencent Maas API key.",
+
+  "proxy": {
+    "listen_port": 0,
+    "anthropic_upstream": "https://tokenhub.tencentmaas.com",
+    "max_tokens_floor": 64000,
+    "include_stock_models": false,
+    "learn_stock_models": false
+  },
+
+  "models": [
+    {
+      "id": "claude-deepseek-v4-pro",
+      "display_name": "DeepSeek V4 Pro (UltraCode)"
+    }
+  ],
+
+  "routes": {
+    "claude-deepseek-v4-pro": {
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough"
+    },
+    "deepseek-v4-pro": {
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough"
+    },
+    "deepseek-v4-pro-202606": {
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough"
+    }
+  }
+}

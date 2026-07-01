@@ -1,0 +1,70 @@
+{
+  "_comment": "ThunderBridge config — Zhipu GLM (Anthropic-compatible gateway at open.bigmodel.cn, passthrough auth).",
+  "_usage": "thunderbridge --profile glm",
+  "_prereq": "ANTHROPIC_AUTH_TOKEN must be set to your Zhipu GLM API key (in ~/.claude/settings.json env block).",
+
+  "proxy": {
+    "listen_port": 0,
+    "_listen_port": "0 = OS picks a free port dynamically. Worktree-safe (matches astockos/maas/deepseek).",
+    "anthropic_upstream": "https://open.bigmodel.cn/api/anthropic",
+    "_anthropic_upstream": "Zhipu GLM Anthropic-compatible gateway (bigmodel.cn /api/anthropic). Same shape as DeepSeek/MaaS: native Anthropic protocol, no openai_compat translation. All traffic forwards here unless a route overrides.",
+    "max_tokens_floor": 64000,
+    "_max_tokens_floor": "GLM-5.2 supports 1M context + large output; 64000 matches the UltraCode envelope floor.",
+
+    "include_stock_models": false,
+    "_include_stock_models": "false = only advertise models from the 'models' list below, not stock Claude (Opus/Sonnet/Haiku). There is no Anthropic key here, so stock Claude would be a dead picker entry.",
+    "learn_stock_models": false,
+    "_learn_stock_models": "false = never auto-discover upstream's real Claude model list (GLM's gateway exposes GLM ids, not Claude ids).",
+
+    "_pool": "── Connection pool (reuse upstream HTTPS connections, ~69ms → ~1ms TLS overhead per request) ──",
+    "pool_max_idle": 5,
+    "_pool_max_idle": "Maximum idle connections kept open per upstream host (default 5). Increase for bursty Workflow workloads.",
+    "pool_max_total": 10,
+    "_pool_max_total": "Hard cap on concurrent connections to a single upstream host (default 10). Requests beyond this create ephemeral connections.",
+    "pool_idle_timeout": 60,
+    "_pool_idle_timeout": "Seconds before an idle connection is closed by the background reaper (default 60).",
+
+    "_circuit": "── Circuit breaker (fast-fail when upstream is down, instead of blocking 600s × 128 threads) ──",
+    "circuit_threshold": 5,
+    "_circuit_threshold": "Number of consecutive upstream connection failures before the breaker opens (default 5).",
+    "circuit_recovery": 30,
+    "_circuit_recovery": "Seconds to wait after OPEN before probing with one half-open request (default 30).",
+
+    "_observability": "── Logging & stats (set UC_REQUEST_LOG / UC_STATS_INTERVAL env vars to override) ──",
+    "request_log": true,
+    "_request_log": "true = emit one structured REQ line per proxied request (key=value format). Set false in high-throughput production.",
+    "stats_interval": 300,
+    "_stats_interval": "Seconds between STATS summary lines (uptime, req count, error rate, rps, KB, active conns). 0 disables."
+  },
+
+  "models": [
+    {
+      "id": "claude-glm-5-2",
+      "display_name": "GLM-5.2 (UltraCode)"
+    }
+  ],
+
+  "routes": {
+    "_routes_note": "Verified 2026-07-01 via `claude -p` direct to bigmodel.cn: Claude Code STRIPS the [1m] suffix from ANTHROPIC_DEFAULT_*_MODEL before sending (settings.json has glm-5.2[1m], but Claude Code emits bare glm-5.2 on the wire → 200). So the route that actually fires for Claude Code traffic is 'glm-5.2' (and 'claude-glm-5-2' if picked in /model). The 'glm-5.2[1m]' key is DEFENSIVE — it only matters for a raw client that sends the suffixed id verbatim (curl does; GLM returns HTTP 400 code 1211 'model does not exist' without this remap). All three route to the same upstream+model. Upstream 'model' is always the BARE 'glm-5.2' — GLM's /api/anthropic gateway rejects the [1m] suffix; [1m] is a Claude-Code-side 1M-context label, not a valid upstream model code.",
+    "claude-glm-5-2": {
+      "_comment": "TB /model picker id. Forward as bare glm-5.2.",
+      "upstream": "https://open.bigmodel.cn/api/anthropic",
+      "model": "glm-5.2",
+      "auth": "passthrough"
+    },
+    "glm-5.2[1m]": {
+      "_comment": "Defensive: a raw client (curl, or a future Claude Code that stops stripping) sends glm-5.2[1m] verbatim → GLM 400 without remap. Today's Claude Code strips first, so this key rarely fires. Maps to bare glm-5.2.",
+      "upstream": "https://open.bigmodel.cn/api/anthropic",
+      "model": "glm-5.2",
+      "auth": "passthrough"
+    },
+    "glm-5.2": {
+      "_comment": "Primary: the id Claude Code actually sends (after stripping [1m]). Forward as-is.",
+      "upstream": "https://open.bigmodel.cn/api/anthropic",
+      "model": "glm-5.2",
+      "auth": "passthrough"
+    }
+  },
+
+  "_migration": "2026-07-01: added GLM profile, corresponding to the ANTHROPIC_BASE_URL switch to https://open.bigmodel.cn/api/anthropic in ~/.claude/settings.json (direct claude already talks to GLM; this profile lets thunderbridge do the same through its UltraCode proxy envelope). Prior AStockOS default (config.astockos.json) stays on Tencent Cloud MAAS DeepSeek — non-destructive; activate GLM with `thunderbridge --profile glm` or `cp config.glm.json config.astockos.json` to make it the default."
+}

@@ -2,8 +2,10 @@
 # ThunderBridge — bridge Claude Code UltraCode mode to third-party models.
 #
 # Usage:
-#   thunderbridge                       interactive (passthrough mode)
+#   thunderbridge                       interactive (default: config.astockos.json)
 #   thunderbridge -p "prompt"           headless batch (same proxy + envelope)
+#   thunderbridge --profile deepseek    use config.deepseek.json
+#   thunderbridge --profile maas        use config.maas.json
 #   thunderbridge --config custom.json  custom config file
 #   thunderbridge --upstream URL        override upstream
 #
@@ -40,9 +42,56 @@ mkdir -p "$BASE_STATE"
 chmod 700 "$BASE_STATE" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Config resolution: THUNDER_CONFIG > config.astockos.json > config.json
+# Parse ThunderBridge own flags (conSUmed, not forwarded to claude).
+# Forward --dangerously-skip-permissions and everything unknown to claude.
 # ---------------------------------------------------------------------------
+PROFILE=""
 CFG="${THUNDER_CONFIG:-}"
+CLAUDE_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --profile)
+      PROFILE="${2:?--profile needs a name (e.g. deepseek, maas, astockos)}"; shift 2 ;;
+    --profile=*)
+      PROFILE="${1#*=}"; shift ;;
+    --config)
+      CFG="${2:?--config needs a path}"; shift 2 ;;
+    --config=*)
+      CFG="${1#*=}"; shift ;;
+    --upstream)
+      THUNDER_UPSTREAM="${2:?--upstream needs a URL}"; shift 2 ;;
+    --upstream=*)
+      THUNDER_UPSTREAM="${1#*=}"; shift ;;
+    -p)
+      CLAUDE_ARGS+=("-p"); shift ;;               # -p is for claude, forward it
+    --dangerously-skip-permissions|--worktree)    # claude flags, forward
+      CLAUDE_ARGS+=("$1"); shift ;;
+    *)
+      CLAUDE_ARGS+=("$1"); shift ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Config resolution: --config > --profile > THUNDER_CONFIG > config.astockos.json > config.json
+# ---------------------------------------------------------------------------
+if [ -n "$PROFILE" ] && [ -z "${THUNDER_CONFIG:-}" ]; then
+  PROFILE_CFG="$REPO/config.${PROFILE}.json"
+  if [ -f "$PROFILE_CFG" ]; then
+    CFG="$PROFILE_CFG"
+  else
+    echo "ThunderBridge: profile '$PROFILE' not found ($PROFILE_CFG)" >&2
+    echo "  Available profiles:" >&2
+    for f in "$REPO"/config.*.json; do
+      [ -f "$f" ] || continue
+      name="$(basename "$f" .json | sed 's/^config\.//')"
+      [ -z "$name" ] && continue  # skip config.json itself (not a profile)
+      [ "$name" = "example" ] && continue  # skip config.example.json
+      desc="$(python3 -c "import json; c=json.load(open('$f')); print(c.get('_comment','')[:80])" 2>/dev/null || true)"
+      printf '    %-16s %s\n' "$name" "$desc" >&2
+    done
+    exit 1
+  fi
+fi
 if [ -z "$CFG" ]; then
   if [ -f "$REPO/config.astockos.json" ]; then
     CFG="$REPO/config.astockos.json"
@@ -82,33 +131,84 @@ fi
 UPSTREAM="${UPSTREAM:-${ANTHROPIC_BASE_URL:-https://api.anthropic.com}}"
 
 # ---------------------------------------------------------------------------
-# Dynamic port: proxy binds 0 (OS picks), writes real port to UC_PORT_FILE
+# Per-instance state files (suffix = this launcher's PID, unique per run).
+# Fixes the shared-file race: concurrent thunderbridge launches used to
+# clobber each other's proxy.port / settings.json, baking a session onto
+# ANOTHER session's port — and when that other session exited and cleaned
+# up its proxy, the orphaned session got ConnectionRefused. (cmux reads
+# whatever --settings path we pass, so a per-instance filename is safe.)
 # ---------------------------------------------------------------------------
-PORT_FILE="$BASE_STATE/proxy.port"
-PID_FILE="$BASE_STATE/proxy.pid"
-LOG_FILE="$BASE_STATE/proxy.log"
-SELECTION_FILE="$BASE_STATE/selection.json"
+INST="$$"
+PORT_FILE="$BASE_STATE/proxy.$INST.port"
+PID_FILE="$BASE_STATE/proxy.$INST.pid"
+SETTINGS_FILE="$BASE_STATE/settings.$INST.json"
+LOG_FILE="$BASE_STATE/proxy.log"            # shared append log (intentional)
+SELECTION_FILE="$BASE_STATE/selection.json" # shared model-selection cache (intentional)
+
+PROXY_PID=""
+SUPERVISOR_PID=""
+
+# ---------------------------------------------------------------------------
+# Reap orphaned proxies from prior sessions whose wrapper was hard-killed
+# (SIGKILL) before its EXIT trap could fire → proxy.py reparented to init
+# (PPID=1). Only proxy.py procs whose parent is init are killed: a live
+# session's proxy still has its wrapper bash as parent, so it is untouched.
+# Also drops stale per-instance pid/port files whose pid is no longer alive.
+# ---------------------------------------------------------------------------
+reap_orphans() {
+  for pf in "$BASE_STATE"/proxy.*.pid; do
+    [ -f "$pf" ] || continue
+    p="$(cat "$pf" 2>/dev/null)" || p=""
+    if [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; then
+      rm -f "$pf" "${pf%.pid}.port"
+    fi
+  done
+  ps -xo pid,ppid,command 2>/dev/null \
+    | awk '$2==1 && /proxy\.py/ {print $1}' 2>/dev/null \
+    | while read -r opid; do
+        [ -z "$opid" ] && continue
+        echo "[ThunderBridge] reaping orphaned proxy pid $opid (PPID=1)" >> "$LOG_FILE" 2>/dev/null || true
+        kill "$opid" 2>/dev/null || true
+      done || true
+}
+reap_orphans
 
 cleanup() {
+  [ -n "${SUPERVISOR_PID:-}" ] && kill "$SUPERVISOR_PID" 2>/dev/null || true
   [ -f "$PID_FILE" ] && kill "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null || true
-  rm -f "$PID_FILE" "$PORT_FILE"
+  [ -n "${PROXY_PID:-}" ] && kill "$PROXY_PID" 2>/dev/null || true
+  rm -f "$PID_FILE" "$PORT_FILE" "$SETTINGS_FILE"
 }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Start proxy
+# Pre-reserve a free loopback port IN THE LAUNCHER (not the proxy). The
+# launcher then KNOWS the port with no shared-file read → no race; and a
+# supervisor can restart the proxy on the SAME port (claude has this port
+# baked into its settings, so it recovers on its next retry, no re-launch).
 # ---------------------------------------------------------------------------
-echo "ThunderBridge: starting proxy -> $UPSTREAM"
-UC_CONFIG="$CFG" \
-  UC_LISTEN_PORT=0 \
-  UC_PORT_FILE="$PORT_FILE" \
-  UC_UPSTREAM="$UPSTREAM" \
-  UC_SELECTION_CACHE="$SELECTION_FILE" \
-  "$PY" "$PROXY" >>"$LOG_FILE" 2>&1 &
-PROXY_PID=$!
-echo "$PROXY_PID" > "$PID_FILE"
+PORT="$("$PY" -c '
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+')" || { echo "ThunderBridge: failed to reserve a free port." >&2; exit 1; }
+BASE_URL="http://127.0.0.1:$PORT"
 
-# Wait for port file + health check.
+# (Re)start the proxy on the fixed $PORT. Updates PROXY_PID + PID_FILE.
+start_proxy() {
+  UC_CONFIG="$CFG" \
+    UC_LISTEN_PORT="$PORT" \
+    UC_PORT_FILE="$PORT_FILE" \
+    UC_UPSTREAM="$UPSTREAM" \
+    UC_SELECTION_CACHE="$SELECTION_FILE" \
+    "$PY" "$PROXY" >>"$LOG_FILE" 2>&1 &
+  PROXY_PID=$!
+  echo "$PROXY_PID" > "$PID_FILE"
+}
+
+# Health check against the known $PORT.
 health_ok() {
   "$PY" -c "
 import json,urllib.request
@@ -121,28 +221,27 @@ except: exit(1)
 " 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# Start proxy + wait for health (fail fast if it died on bind).
+# ---------------------------------------------------------------------------
+echo "ThunderBridge: starting proxy -> $UPSTREAM"
+start_proxy
+proxy_ready=0
 for _ in $(seq 1 40); do
-  if [ -f "$PORT_FILE" ]; then
-    PORT="$(cat "$PORT_FILE")"
-    if health_ok; then break; fi
-  fi
+  if health_ok; then proxy_ready=1; break; fi
+  kill -0 "$PROXY_PID" 2>/dev/null || break   # proxy exited during startup
   sleep 0.25
 done
-
-if [ ! -f "$PORT_FILE" ]; then
-  echo "ThunderBridge: proxy failed to start. Log:" >&2
+if [ "$proxy_ready" -ne 1 ]; then
+  echo "ThunderBridge: proxy failed to start on $BASE_URL. Log:" >&2
   tail -20 "$LOG_FILE" >&2 || true
   exit 1
 fi
-
-PORT="$(cat "$PORT_FILE")"
-BASE_URL="http://127.0.0.1:$PORT"
-echo "ThunderBridge: proxy ready on $BASE_URL"
+echo "ThunderBridge: proxy ready on $BASE_URL (pid $PROXY_PID)"
 
 # ---------------------------------------------------------------------------
-# Session-scoped settings (ANTHROPIC_BASE_URL only for this process)
+# Session-scoped settings (per-instance path; carries only this port).
 # ---------------------------------------------------------------------------
-SETTINGS_FILE="$BASE_STATE/settings.json"
 SETTINGS_TMP="$(umask 077; mktemp "$BASE_STATE/.settings.XXXXXX")"
 cat > "$SETTINGS_TMP" <<JSON
 {
@@ -185,14 +284,45 @@ except: pass
 PY
 
 # ---------------------------------------------------------------------------
-# Launch
+# Supervise: if the proxy dies while the session is live, restart it on the
+# SAME pre-reserved port (claude recovers on its next retry). Runs in the
+# background; ignores INT/TERM so an interactive Ctrl+C (handled by claude,
+# which stays in the foreground) doesn't take the supervisor down. Restarts
+# are capped to avoid a crash-loop. cleanup() (EXIT trap) kills it on exit.
+# ---------------------------------------------------------------------------
+MAX_RESTARTS=5
+supervise() {
+  set +e
+  trap '' INT TERM
+  count=0
+  while [ -f "$PID_FILE" ]; do
+    sleep 2
+    [ -f "$PID_FILE" ] || return 0
+    if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+      if [ "$count" -ge "$MAX_RESTARTS" ]; then
+        echo "[ThunderBridge] proxy died; restart cap ($MAX_RESTARTS) reached — leaving it down." >> "$LOG_FILE" 2>/dev/null || true
+        return 0
+      fi
+      count=$((count + 1))
+      echo "[ThunderBridge] proxy pid $PROXY_PID died — restarting on $PORT (attempt $count/$MAX_RESTARTS)" >> "$LOG_FILE" 2>/dev/null || true
+      start_proxy
+      for _ in $(seq 1 20); do health_ok && break; sleep 0.25; done
+    fi
+  done
+}
+supervise &
+SUPERVISOR_PID=$!
+
+# ---------------------------------------------------------------------------
+# Launch Claude in the FOREGROUND (so Ctrl+C / interactive signals behave
+# exactly as before — claude handles them, the shell keeps waiting). The
+# shell survives claude so the EXIT trap fires and cleanup() tears down the
+# proxy + supervisor. NOT exec'd.
 # ---------------------------------------------------------------------------
 echo "ThunderBridge: launching Claude Code (UltraCode envelope active)"
-echo "  Proxy:     $BASE_URL -> $UPSTREAM"
+echo "  Proxy:     $BASE_URL -> $UPSTREAM (supervised: same-port restart on death)"
+[ -n "$PROFILE" ] && echo "  Profile:   $PROFILE ($(python3 -c "import json; c=json.load(open('$CFG')); print(c.get('_comment','')[:60])" 2>/dev/null || echo "$CFG"))"
 echo "  Envelope:  effort=xhigh, max_tokens>=64000, thinking=adaptive"
 echo ""
 
-claude --settings "$SETTINGS_FILE" "$@"
-# exec NOT used — the shell must survive claude so the EXIT trap
-# fires and cleanup() kills the proxy. With exec, bash is replaced
-# by claude and the trap is lost → orphaned proxy process.
+claude --settings "$SETTINGS_FILE" "${CLAUDE_ARGS[@]}"

@@ -1,33 +1,66 @@
 {
-  "_comment": "ThunderBridge config for AStockOS — passthrough mode (Anthropic-native upstream, no OpenAI translation).",
+  "_comment": "ThunderBridge config for AStockOS — Tencent Cloud MAAS (Anthropic-compatible gateway, passthrough auth).",
   "_usage": "cp config.astockos.json config.json  # then launch with bin/thunderbridge",
+  "_prereq": "ANTHROPIC_AUTH_TOKEN must be set to your Tencent Maas API key (in ~/.claude/settings.json env block).",
 
   "proxy": {
     "listen_port": 0,
-    "_listen_port": "0 = OS picks a free port dynamically. Set to e.g. 18141 for fixed.",
+    "_listen_port": "0 = OS picks a free port dynamically. Worktree-safe.",
     "anthropic_upstream": "https://tokenhub.tencentmaas.com",
-    "_anthropic_upstream": "Your Anthropic-compatible API gateway. ThunderBridge only injects the UltraCode envelope and forwards.",
+    "_anthropic_upstream": "Tencent Cloud MaaS Anthropic-compatible gateway. All traffic forwards here unless a route overrides.",
     "max_tokens_floor": 64000,
+
     "include_stock_models": false,
-    "learn_stock_models": false
+    "_include_stock_models": "false = only advertise models from the 'models' list below, not stock Claude (Opus/Sonnet/Haiku). Set true if you want real Claude in /model too.",
+    "learn_stock_models": false,
+    "_learn_stock_models": "false = never auto-discover upstream's real Claude model list. Set true to cache new Claude releases automatically.",
+
+    "_pool": "── Connection pool (reuse upstream HTTPS connections, ~69ms → ~1ms TLS overhead per request) ──",
+    "pool_max_idle": 5,
+    "_pool_max_idle": "Maximum idle connections kept open per upstream host (default 5). Increase for bursty Workflow workloads.",
+    "pool_max_total": 10,
+    "_pool_max_total": "Hard cap on concurrent connections to a single upstream host (default 10). Requests beyond this create ephemeral connections.",
+    "pool_idle_timeout": 60,
+    "_pool_idle_timeout": "Seconds before an idle connection is closed by the background reaper (default 60).",
+
+    "_circuit": "── Circuit breaker (fast-fail when upstream is down, instead of blocking 600s × 128 threads) ──",
+    "circuit_threshold": 5,
+    "_circuit_threshold": "Number of consecutive upstream connection failures before the breaker opens (default 5).",
+    "circuit_recovery": 30,
+    "_circuit_recovery": "Seconds to wait after OPEN before probing with one half-open request (default 30).",
+
+    "_observability": "── Logging & stats (set UC_REQUEST_LOG / UC_STATS_INTERVAL env vars to override) ──",
+    "request_log": true,
+    "_request_log": "true = emit one structured REQ line per proxied request (key=value format). Set false in high-throughput production.",
+    "stats_interval": 300,
+    "_stats_interval": "Seconds between STATS summary lines (uptime, req count, error rate, rps, KB, active conns). 0 disables."
   },
 
   "models": [
     {
-      "id": "claude-deepseek",
-      "display_name": "DeepSeek V4 Pro (UltraCode)"
+      "id": "claude-deepseek-v4-pro",
+      "display_name": "DeepSeek V4 Pro (Tencent MaaS)"
     }
   ],
 
   "routes": {
-    "claude-deepseek": {
-      "_type": "omitted = Anthropic passthrough. No protocol translation — envelope injection only.",
+    "_why_three_keys": "Claude Code may send different model IDs: (a) claude-deepseek-v4-pro from TB model picker, (b) deepseek-v4-pro from ANTHROPIC_MODEL or /model, (c) deepseek-v4-pro-202606 from ANTHROPIC_DEFAULT_*_MODEL settings. All three must route to the same upstream.",
+    "claude-deepseek-v4-pro": {
       "upstream": "https://tokenhub.tencentmaas.com",
       "model": "deepseek-v4-pro-202606",
-      "auth": "passthrough",
-      "_auth_passthrough": "Forwards Claude Code's own x-api-key header unchanged."
+      "auth": "passthrough"
+    },
+    "deepseek-v4-pro": {
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough"
+    },
+    "deepseek-v4-pro-202606": {
+      "upstream": "https://tokenhub.tencentmaas.com",
+      "model": "deepseek-v4-pro-202606",
+      "auth": "passthrough"
     }
   },
 
-  "_extending": "To add more models (e.g., a cheaper worker for sub-agents): add an entry to 'models' and 'routes' with type 'openai_compat' for OpenAI-format backends, or omit 'type' for Anthropic passthrough. Then you get orchestrator/worker model separation."
+  "_migration": "2026-07-01: switched from DeepSeek official API (api.deepseek.com/anthropic, model=deepseek-v4-pro) back to Tencent Cloud MAAS (tokenhub.tencentmaas.com, model=deepseek-v4-pro-202606). DeepSeek official config preserved as config.deepseek.json."
 }
